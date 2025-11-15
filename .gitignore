@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.pyc
+
+# Logs
+logs/
+*.log
+
+# Build artifacts (will be built in Docker)
+MCTS/*.o
+MCTS/*.dSYM
+MCTS/mcts_bridge
+MCTS/chess_play
+MCTS/chess_mcts
+MCTS/*.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Git LFS pointer files (if not using LFS)
+# Uncomment if not using Git LFS:
+# *.pt
