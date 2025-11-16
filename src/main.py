@@ -287,7 +287,7 @@ else:
 
 # MCTS parameters
 MAX_ITERATIONS = 20000
-MAX_SECONDS = 2
+MAX_SECONDS = 1
 CPUCT = 1.5
 
 # Logging configuration
