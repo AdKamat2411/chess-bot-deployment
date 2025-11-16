@@ -41,5 +41,5 @@ MCTS/mcts_bridge
 
 # Exclude other model files (only include the one we need)
 *.pt
-!chessnet_new_ts.pt
+!MCZeroV1.pt
 
