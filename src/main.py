@@ -358,9 +358,6 @@ def _download_model_from_huggingface():
 # Initialize model at module import
 ensure_model_ready()
 
-# Start persistent bridge process (model loaded once, stays in memory)
-_start_persistent_bridge()
-
 # ============================================================================
 # LOGGING CONFIGURATION
 # ============================================================================
@@ -474,6 +471,9 @@ def _start_persistent_bridge():
             print(f"[INIT] ERROR: Failed to start persistent bridge: {type(e).__name__}: {e}")
             _bridge_process = None
             return False
+
+# Start persistent bridge process (model loaded once, stays in memory)
+_start_persistent_bridge()
 
 def run_bridge(fen: str) -> str:
     """
