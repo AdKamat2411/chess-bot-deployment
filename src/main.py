@@ -358,6 +358,9 @@ def _download_model_from_huggingface():
 # Initialize model at module import
 ensure_model_ready()
 
+# Start persistent bridge process (model loaded once, stays in memory)
+_start_persistent_bridge()
+
 # ============================================================================
 # LOGGING CONFIGURATION
 # ============================================================================
@@ -405,44 +408,115 @@ def uci_to_move(board: Board, uci_str: str) -> Move:
     except ValueError as e:
         raise ValueError(f"Invalid UCI move format '{uci_str}': {e}")
 
+# ============================================================================
+# PERSISTENT BRIDGE PROCESS
+# ============================================================================
+
+_bridge_process = None
+_bridge_stdin = None
+_bridge_stdout = None
+_bridge_lock = None
+
+def _init_bridge_lock():
+    """Initialize the bridge lock (thread-safe)."""
+    global _bridge_lock
+    if _bridge_lock is None:
+        import threading
+        _bridge_lock = threading.Lock()
+
+def _start_persistent_bridge():
+    """Start the persistent bridge process that keeps the model loaded in memory."""
+    global _bridge_process, _bridge_stdin, _bridge_stdout
+    
+    _init_bridge_lock()
+    
+    with _bridge_lock:
+        if _bridge_process is not None and _bridge_process.poll() is None:
+            # Process is still alive
+            return True
+        
+        print(f"[INIT] Starting persistent bridge process (model loads once)...")
+        try:
+            _bridge_process = subprocess.Popen(
+                [
+                    MCTS_BRIDGE_PATH,
+                    "--persistent",
+                    MODEL_PATH,
+                    str(MAX_ITERATIONS),
+                    str(MAX_SECONDS),
+                    str(CPUCT)
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1  # Line buffered
+            )
+            
+            _bridge_stdin = _bridge_process.stdin
+            _bridge_stdout = _bridge_process.stdout
+            
+            # Wait a moment to see if it starts successfully
+            import time
+            time.sleep(0.5)
+            
+            if _bridge_process.poll() is not None:
+                # Process died immediately
+                stderr_output = _bridge_process.stderr.read() if _bridge_process.stderr else "No stderr"
+                print(f"[INIT] ERROR: Bridge process died immediately: {stderr_output}")
+                _bridge_process = None
+                return False
+            
+            print(f"[INIT] Persistent bridge started (PID: {_bridge_process.pid})")
+            return True
+            
+        except Exception as e:
+            print(f"[INIT] ERROR: Failed to start persistent bridge: {type(e).__name__}: {e}")
+            _bridge_process = None
+            return False
 
 def run_bridge(fen: str) -> str:
     """
-    Execute the MCTS bridge subprocess and return the UCI move string.
+    Execute the MCTS bridge and return the UCI move string.
+    Uses persistent bridge process to avoid reloading model on every move.
     """
+    global _bridge_process, _bridge_stdin, _bridge_stdout
+    
     assert MODEL_READY, "Model not ready — initialization failed"
     assert os.path.exists(MCTS_BRIDGE_PATH), f"Bridge not found at {MCTS_BRIDGE_PATH}"
     
-    result = subprocess.run(
-        [
-            MCTS_BRIDGE_PATH,
-            MODEL_PATH,
-            fen,
-            str(MAX_ITERATIONS),
-            str(MAX_SECONDS),
-            str(CPUCT)
-        ],
-        capture_output=True,
-        text=True,
-        timeout=MAX_SECONDS + 10,  # Add buffer for overhead
-        check=True
-    )
+    _init_bridge_lock()
     
-    # Save debug output to log file
-    if result.stderr:
-        _log_to_file("=== MCTS Bridge Debug Output ===\n" + result.stderr)
+    # Ensure bridge is running
+    if not _start_persistent_bridge():
+        raise RuntimeError("Failed to start persistent bridge")
     
-    # Parse output (should be UCI move string)
-    uci_move = result.stdout.strip()
-    
-    if not uci_move:
-        # Check stderr for error messages
-        if result.stderr:
-            error_msg = result.stderr
-            raise RuntimeError(f"MCTS bridge error: {error_msg}")
-        raise RuntimeError("MCTS bridge returned empty output")
-    
-    return uci_move
+    with _bridge_lock:
+        try:
+            # Send FEN to bridge
+            _bridge_stdin.write(fen + "\n")
+            _bridge_stdin.flush()
+            
+            # Read move from bridge (blocking read)
+            move = _bridge_stdout.readline().strip()
+            
+            if not move:
+                # Process might have died
+                if _bridge_process.poll() is not None:
+                    stderr_output = _bridge_process.stderr.read() if _bridge_process.stderr else "No stderr"
+                    raise RuntimeError(f"Bridge process died: {stderr_output}")
+                raise RuntimeError("Bridge returned empty move")
+            
+            return move
+            
+        except BrokenPipeError:
+            # Process died
+            _bridge_process = None
+            _bridge_stdin = None
+            _bridge_stdout = None
+            raise RuntimeError("Bridge process died (broken pipe)")
+        except Exception as e:
+            raise RuntimeError(f"Error communicating with bridge: {type(e).__name__}: {e}")
 
 # ============================================================================
 # MOVE GENERATION
