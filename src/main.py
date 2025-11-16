@@ -15,26 +15,50 @@ if os.path.exists("/app/mcts_bridge"):
     MODEL_PATH = "/app/model.pt"
     _project_root = "/app"
 else:
-    # Running locally - try to find project root
+    # Running locally or in non-Docker deployment - try to find project root
     # Case 1: Separate deployment repo (MCTS/ is sibling of src/)
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     _possible_root1 = os.path.dirname(_script_dir)  # Go up from src/ to repo root
     # Case 2: Nested in ChessMirror (my-chesshacks-bot/src/)
     _possible_root2 = os.path.dirname(os.path.dirname(_possible_root1))  # Go up to ChessMirror
     
+    # Debug: Print detected paths
+    print(f"[PATH DEBUG] Script dir: {_script_dir}")
+    print(f"[PATH DEBUG] Possible root 1: {_possible_root1}")
+    print(f"[PATH DEBUG] Possible root 2: {_possible_root2}")
+    
     # Check which structure we're in
-    if os.path.exists(os.path.join(_possible_root1, "MCTS", "mcts_bridge")):
+    bridge_path1 = os.path.join(_possible_root1, "MCTS", "mcts_bridge")
+    bridge_path2 = os.path.join(_possible_root2, "MCTS", "mcts_bridge")
+    
+    print(f"[PATH DEBUG] Checking bridge at: {bridge_path1} (exists: {os.path.exists(bridge_path1)})")
+    print(f"[PATH DEBUG] Checking bridge at: {bridge_path2} (exists: {os.path.exists(bridge_path2)})")
+    
+    if os.path.exists(bridge_path1):
         # Separate deployment repo
         _project_root = _possible_root1
-    elif os.path.exists(os.path.join(_possible_root2, "MCTS", "mcts_bridge")):
+        print(f"[PATH DEBUG] Using separate repo structure, root: {_project_root}")
+    elif os.path.exists(bridge_path2):
         # Nested in ChessMirror
         _project_root = _possible_root2
+        print(f"[PATH DEBUG] Using nested structure, root: {_project_root}")
     else:
         # Fallback: assume separate repo structure
         _project_root = _possible_root1
+        print(f"[PATH DEBUG] Fallback to separate repo structure, root: {_project_root}")
+        # List directory contents for debugging
+        if os.path.exists(_project_root):
+            try:
+                contents = os.listdir(_project_root)
+                print(f"[PATH DEBUG] Root directory contents: {contents}")
+            except Exception as e:
+                print(f"[PATH DEBUG] Could not list root directory: {e}")
     
     MCTS_BRIDGE_PATH = os.path.join(_project_root, "MCTS", "mcts_bridge")
     MODEL_PATH = os.path.join(_project_root, "MCZeroV1.pt")
+    
+    print(f"[PATH DEBUG] Final bridge path: {MCTS_BRIDGE_PATH}")
+    print(f"[PATH DEBUG] Final model path: {MODEL_PATH}")
 
 # MCTS parameters
 MAX_ITERATIONS = 20000
