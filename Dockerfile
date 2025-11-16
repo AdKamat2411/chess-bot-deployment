@@ -51,12 +51,12 @@ COPY serve.py /app/serve.py
 # Copy model file
 # IMPORTANT: The model file must be available in the build context.
 # Options:
-# 1. Use Git LFS: git lfs track "chessnet_new_ts.pt" && git add chessnet_new_ts.pt
+# 1. Use Git LFS: git lfs track "MCZeroV1.pt" && git add MCZeroV1.pt
 # 2. Download during build: Uncomment the RUN wget line below and provide URL
 # 3. Host on GitHub Releases and download in build
-COPY chessnet_new_ts.pt /app/model.pt
+COPY MCZeroV1.pt /app/model.pt
 # Alternative: Download from URL (uncomment and update):
-# RUN wget -O /app/model.pt https://github.com/yourusername/yourrepo/releases/download/v1.0/chessnet_new_ts.pt || \
+# RUN wget -O /app/model.pt https://github.com/yourusername/yourrepo/releases/download/v1.0/MCZeroV1.pt || \
 #     (echo "ERROR: Model file not found. Please configure model download in Dockerfile." && exit 1)
 
 # Install Python dependencies

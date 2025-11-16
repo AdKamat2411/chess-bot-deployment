@@ -34,7 +34,7 @@ else:
         _project_root = _possible_root1
     
     MCTS_BRIDGE_PATH = os.path.join(_project_root, "MCTS", "mcts_bridge")
-    MODEL_PATH = os.path.join(_project_root, "chessnet_new_ts.pt")
+    MODEL_PATH = os.path.join(_project_root, "MCZeroV1.pt")
 
 # MCTS parameters
 MAX_ITERATIONS = 20000
