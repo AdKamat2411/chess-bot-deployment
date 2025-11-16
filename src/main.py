@@ -37,10 +37,10 @@ print(f"[PATH DEBUG] Possible root 1: {_possible_root1}")
 print(f"[PATH DEBUG] Possible root 2: {_possible_root2}")
 
 # Check which structure we're in
-if os.path.exists(os.path.join(_possible_root1, "MCZeroV1.pt")) or os.path.exists(os.path.join(_possible_root1, "requirements.txt")):
+if os.path.exists(os.path.join(_possible_root1, "MCZeroV2.pt")) or os.path.exists(os.path.join(_possible_root1, "requirements.txt")):
     _project_root = _possible_root1
     print(f"[PATH DEBUG] Using separate repo structure, root: {_project_root}")
-elif os.path.exists(os.path.join(_possible_root2, "MCZeroV1.pt")) or os.path.exists(os.path.join(_possible_root2, "requirements.txt")):
+elif os.path.exists(os.path.join(_possible_root2, "MCZeroV2.pt")) or os.path.exists(os.path.join(_possible_root2, "requirements.txt")):
     _project_root = _possible_root2
     print(f"[PATH DEBUG] Using nested structure, root: {_project_root}")
 else:
@@ -56,7 +56,7 @@ if os.path.exists(_project_root):
     except Exception as e:
         print(f"[PATH DEBUG] Could not list root directory: {e}")
 
-MODEL_PATH = os.path.join(_project_root, "MCZeroV1.pt")
+MODEL_PATH = os.path.join(_project_root, "MCZeroV2.pt")
 
 print(f"[PATH DEBUG] Final model path: {MODEL_PATH}")
 
@@ -141,7 +141,7 @@ def _download_model_from_huggingface():
         from huggingface_hub import hf_hub_download
         
         hf_repo_id = os.environ.get("HF_MODEL_REPO", "Hiyo1256/chess-mcts-models")
-        hf_filename = "MCZeroV3.pt"
+        hf_filename = "MCZeroV2.pt"
         
         print(f"[INIT] Downloading {hf_filename} from {hf_repo_id}...")
         downloaded_path = hf_hub_download(
@@ -202,82 +202,39 @@ def _log_to_file(message: str):
 # BOARD ENCODING
 # ============================================================================
 
-def encode_board(board: Board) -> torch.Tensor:
-    """
-    Encode chess board to 18-channel 8x8 tensor.
-    Channels 0-11: Piece planes (white pawn, knight, bishop, rook, queen, king, then black pieces)
-    Channel 12: Side to move (1.0 for white, 0.0 for black) - full 8x8 plane
-    Channels 13-16: Castling rights (white kingside, white queenside, black kingside, black queenside)
-    Channel 17: En passant target square
-    Returns: torch.Tensor of shape (1, 18, 8, 8)
-    """
-    # Initialize tensor: (18 channels, 8 rows, 8 cols)
-    tensor = torch.zeros(18, 8, 8, dtype=torch.float32)
-    
-    # Channels 0-11: Pieces
-    piece_channels = {
-        ('P', True): 0,   # White pawn
-        ('N', True): 1,   # White knight
-        ('B', True): 2,   # White bishop
-        ('R', True): 3,   # White rook
-        ('Q', True): 4,   # White queen
-        ('K', True): 5,   # White king
-        ('p', False): 6,  # Black pawn
-        ('n', False): 7,  # Black knight
-        ('b', False): 8,  # Black bishop
-        ('r', False): 9,  # Black rook
-        ('q', False): 10, # Black queen
-        ('k', False): 11, # Black king
+def board_to_tensor(board: Board) -> torch.Tensor:
+    """Encode chess board to neural network input tensor."""
+    tensor = torch.zeros(1, 18, 8, 8, dtype=torch.float32)
+    piece_to_channel = {
+        ('P', True): 0, ('N', True): 1, ('B', True): 2, ('R', True): 3,
+        ('Q', True): 4, ('K', True): 5, ('P', False): 6, ('N', False): 7,
+        ('B', False): 8, ('R', False): 9, ('Q', False): 10, ('K', False): 11
     }
     
-    # Encode pieces
-    for rank in range(8):
-        for file in range(8):
-            square = Square(file + rank * 8)
-            piece = board.piece_at(square)
-            
-            if piece is not None:
-                piece_symbol = piece.symbol()
-                is_white = piece.color
-                channel = piece_channels.get((piece_symbol, is_white))
-                if channel is not None:
-                    tensor[channel, rank, file] = 1.0
+    for square in range(64):
+        piece = board.piece_at(square)
+        if piece:
+            r = square // 8
+            c = square % 8
+            ch = piece_to_channel[(piece.symbol().upper(), piece.color)]
+            tensor[0, ch, r, c] = 1.0
     
-    # Channel 12: Side to move (1.0 for white, 0.0 for black)
-    side_to_move_value = 1.0 if board.turn else 0.0
-    tensor[12, :, :] = side_to_move_value
+    tensor[0, 12] = 1.0 if board.turn else 0.0
+    tensor[0, 13] = 1.0 if board.has_kingside_castling_rights(True) else 0.0
+    tensor[0, 14] = 1.0 if board.has_queenside_castling_rights(True) else 0.0
+    tensor[0, 15] = 1.0 if board.has_kingside_castling_rights(False) else 0.0
+    tensor[0, 16] = 1.0 if board.has_queenside_castling_rights(False) else 0.0
     
-    # Channels 13-16: Castling rights
-    if board.has_kingside_castling_rights(True):   # White kingside
-        tensor[13, :, :] = 1.0
-    if board.has_queenside_castling_rights(True): # White queenside
-        tensor[14, :, :] = 1.0
-    if board.has_kingside_castling_rights(False):  # Black kingside
-        tensor[15, :, :] = 1.0
-    if board.has_queenside_castling_rights(False): # Black queenside
-        tensor[16, :, :] = 1.0
-    
-    # Channel 17: En passant target square
     if board.ep_square is not None:
-        ep_rank = board.ep_square // 8
-        ep_file = board.ep_square % 8
-        tensor[17, ep_rank, ep_file] = 1.0
+        r = board.ep_square // 8
+        c = board.ep_square % 8
+        tensor[0, 17, r, c] = 1.0
     
-    # Add batch dimension: (1, 18, 8, 8)
-    return tensor.unsqueeze(0)
+    return tensor
 
 # ============================================================================
 # POLICY TO MOVE MAPPING
 # ============================================================================
-
-def policy_index_to_move(policy_idx: int) -> tuple:
-    """
-    Convert policy index (0-4095) to (from_square, to_square).
-    Policy index = from_square * 64 + to_square
-    """
-    from_square = policy_idx // 64
-    to_square = policy_idx % 64
-    return (from_square, to_square)
 
 def move_to_policy_index(move: Move) -> int:
     """
@@ -292,95 +249,56 @@ def move_to_policy_index(move: Move) -> int:
 # INFERENCE
 # ============================================================================
 
-def run_inference(board: Board) -> tuple:
-    """
-    Run model inference on board position.
-    Returns: (policy_tensor, value)
-    - policy_tensor: torch.Tensor of shape (4096,) with policy logits
-    - value: float in [-1, 1] range
-    """
-    global _model
-    
-    assert MODEL_READY, "Model not ready — initialization failed"
-    assert _model is not None, "Model not loaded"
-    
-    # Encode board to tensor
-    board_tensor = encode_board(board)
-    
-    # Run inference
+def predict_position(board: Board, model: torch.jit.ScriptModule):
+    """Run neural network inference on a position. Returns (policy_dict, value)."""
+    input_tensor = board_to_tensor(board)
     with torch.no_grad():
-        outputs = _model(board_tensor)
-        
-        # Model outputs: (policy_logits, value)
-        if isinstance(outputs, tuple):
-            policy_logits = outputs[0]  # Shape: (1, 4096)
-            value = outputs[1].item()   # Shape: (1,)
-        else:
-            # Handle case where model returns single tensor
-            policy_logits = outputs[0] if len(outputs) > 0 else outputs
-            value = 0.0
-    
-    # Remove batch dimension from policy: (4096,)
-    if policy_logits.dim() > 1:
-        policy_logits = policy_logits.squeeze(0)
-    
-    return policy_logits, value
-
-def predict_position(board: Board) -> tuple:
-    """
-    Run neural network inference on a position.
-    Returns (policy_dict, value) where policy_dict maps UCI moves to probabilities.
-    """
-    global _model
-    
-    assert MODEL_READY, "Model not ready — initialization failed"
-    assert _model is not None, "Model not loaded"
-    
-    # Encode board
-    input_tensor = encode_board(board)
-    
-    # Run inference
-    with torch.no_grad():
-        policy_logits, value_tensor = _model(input_tensor)
-        
-        # Extract value (already in [-1, +1] range)
-        if isinstance(value_tensor, torch.Tensor):
-            value = float(value_tensor.item())
-        else:
-            value = float(value_tensor)
-        
-        # Get legal moves and their policy probabilities
+        policy_logits, value_tensor = model(input_tensor)
+        value = float(value_tensor.item())
         legal_moves = list(board.legal_moves)
         if not legal_moves:
             return {}, value
-            
-        # Extract policy for legal moves
+        
         import torch.nn.functional as F
-        if policy_logits.dim() > 1:
-            policy_logits = policy_logits.squeeze(0)
-        policy_probs = F.softmax(policy_logits, dim=0)
-        
-        # Build policy dictionary
+        policy_probs = F.softmax(policy_logits.view(-1), dim=0)
         move_probs = {}
-        total_prob = 0.0
+        total = 0.0
         
-        for move in legal_moves:
-            policy_idx = move_to_policy_index(move)
-            if 0 <= policy_idx < len(policy_probs):
-                prob = float(policy_probs[policy_idx])
-                move_probs[move.uci()] = prob
-                total_prob += prob
+        for m in legal_moves:
+            idx = move_to_policy_index(m)
+            if 0 <= idx < len(policy_probs):
+                p = float(policy_probs[idx])
+                move_probs[m.uci()] = p
+                total += p
         
-        # Normalize probabilities
-        if total_prob > 0:
-            for move_uci in move_probs:
-                move_probs[move_uci] /= total_prob
+        if total > 0:
+            for k in move_probs:
+                move_probs[k] /= total
         else:
-            # Uniform fallback
-            uniform_prob = 1.0 / len(legal_moves)
-            move_probs = {move.uci(): uniform_prob for move in legal_moves}
+            u = 1.0 / len(legal_moves)
+            move_probs = {m.uci(): u for m in legal_moves}
     
     return move_probs, value
+
+def one_step_mcts(board: Board, model: torch.jit.ScriptModule, lambda_weight=LAMBDA):
+    """One-step MCTS: evaluate current and child positions, select best move."""
+    current_policy, current_value = predict_position(board, model)
+    if not current_policy:
+        raise ValueError("No legal moves available")
+    
+    move_scores = {}
+    
+    for move_uci, prob in current_policy.items():
+        move = Move.from_uci(move_uci)
+        b2 = board.copy()
+        b2.push(move)
+        _, child_value = predict_position(b2, model)
+        child_value = -child_value
+        diff = child_value - current_value
+        score = prob + lambda_weight * diff
+        move_scores[move_uci] = score
+    
+    return max(move_scores.items(), key=lambda x: x[1])[0]
 
 # ============================================================================
 # MOVE GENERATION
@@ -388,112 +306,44 @@ def predict_position(board: Board) -> tuple:
 
 @chess_manager.entrypoint
 def mcts_move(ctx: GameContext):
-    """
-    Generate a move using One-Step MCTS with neural network.
-    Evaluates current position and all child positions, then selects move using PUCT-style formula.
-    """
-    assert MODEL_READY, "Model not ready — initialization failed"
-    
-    # Get current board
-    board = ctx.board
-    
-    # Check if we have legal moves
-    legal_moves = list(board.generate_legal_moves())
-    if not legal_moves:
+    """Generate a move using One-Step MCTS with neural network."""
+    fen = ctx.board.fen()
+    legal = list(ctx.board.generate_legal_moves())
+    if not legal:
         ctx.logProbabilities({})
         raise ValueError("No legal moves available")
     
-    # Debug: Print move request
-    side_to_move = "White" if board.turn else "Black"
-    log_msg = f"=== One-Step MCTS Request ===\nSide to move: {side_to_move}\nFEN: {board.fen()}"
-    print(log_msg)
-    _log_to_file(log_msg)
-    
     try:
-        # Time the move generation
-        import time
-        move_start_time = time.perf_counter()
+        model = _model
+        if model is None:
+            raise FileNotFoundError("Model not loaded")
         
-        # Evaluate current position
-        current_policy, current_value = predict_position(board)
+        best = one_step_mcts(ctx.board, model)
+        move = Move.from_uci(best)
+        if move not in legal:
+            raise ValueError("Illegal move selected")
         
-        if not current_policy:
-            raise ValueError("No legal moves available")
-        
-        print(f"[One-Step MCTS] Current position value: {current_value:.4f}")
-        print(f"[One-Step MCTS] Evaluating {len(current_policy)} legal moves...")
-        
-        # Evaluate each child position
-        move_scores = {}
-        
-        for move_uci, policy_prob in current_policy.items():
-            # Make the move
-            move = Move.from_uci(move_uci)
-            board_copy = board.copy()
-            board_copy.push(move)
-            
-            # Evaluate child position
-            _, child_value = predict_position(board_copy)
-            
-            # Flip value for opponent's perspective
-            child_value = -child_value
-            
-            # Calculate PUCT score: P(m) + λ * (V(s_m) - V(s))
-            value_diff = child_value - current_value
-            puct_score = policy_prob + LAMBDA * value_diff
-            
-            move_scores[move_uci] = {
-                'policy': policy_prob,
-                'child_value': child_value,
-                'value_diff': value_diff,
-                'puct_score': puct_score
-            }
-        
-        # Select move with highest PUCT score
-        best_move_uci = max(move_scores.items(), key=lambda x: x[1]['puct_score'])[0]
-        best_score = move_scores[best_move_uci]['puct_score']
-        
-        print(f"[One-Step MCTS] Selected: {best_move_uci} (PUCT score: {best_score:.4f})")
-        
-        # Convert to python-chess Move
-        best_move = Move.from_uci(best_move_uci)
-        
-        # Verify move is legal
-        if best_move not in legal_moves:
-            raise ValueError(f"Selected move {best_move_uci} is not legal")
-        
-        move_end_time = time.perf_counter()
-        move_time_ms = (move_end_time - move_start_time) * 1000
-        
-        print(f"[One-Step MCTS] Move generation time: {move_time_ms:.2f}ms")
-        _log_to_file(f"Selected move: {best_move_uci} (PUCT score: {best_score:.4f}, time: {move_time_ms:.2f}ms)")
-        
-        # Get final policy for logging
-        move_probs = {}
-        for move in legal_moves:
-            move_uci = move.uci()
-            move_probs[move] = current_policy.get(move_uci, 0.0)
-        
+        policy_dict, _ = predict_position(ctx.board, model)
+        move_probs = {m: policy_dict.get(m.uci(), 0.0) for m in legal}
         ctx.logProbabilities(move_probs)
+        return move
         
-        return best_move
-        
-    except Exception as e:
-        print(f"[One-Step MCTS] ERROR: Unexpected error: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+    except FileNotFoundError:
+        import random
+        move = random.choice(legal)
+        u = 1.0 / len(legal)
+        ctx.logProbabilities({m: u for m in legal})
+        return move
 
 
 @chess_manager.reset
 def reset_func(ctx: GameContext):
-    """
-    Called when a new game begins.
-    Can reset caches, model state, etc.
-    """
-    global _log_file
+    """Called when a new game begins."""
+    global _log_file, _model
     _log_file = _get_log_file()
-    side_to_move = "White" if ctx.board.turn else "Black"
-    reset_msg = f"=== New Game Started ===\nFEN: {ctx.board.fen()}\nSide to move: {side_to_move}\nLog file: {_log_file}"
-    print(reset_msg)
-    _log_to_file(reset_msg)
+    try:
+        # Ensure model is loaded
+        if _model is None:
+            ensure_model_ready()
+    except:
+        _model = None
