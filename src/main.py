@@ -37,10 +37,10 @@ print(f"[PATH DEBUG] Possible root 1: {_possible_root1}")
 print(f"[PATH DEBUG] Possible root 2: {_possible_root2}")
 
 # Check which structure we're in
-if os.path.exists(os.path.join(_possible_root1, "MCZeroV2.pt")) or os.path.exists(os.path.join(_possible_root1, "requirements.txt")):
+if os.path.exists(os.path.join(_possible_root1, "MCZeroV3.pt")) or os.path.exists(os.path.join(_possible_root1, "requirements.txt")):
     _project_root = _possible_root1
     print(f"[PATH DEBUG] Using separate repo structure, root: {_project_root}")
-elif os.path.exists(os.path.join(_possible_root2, "MCZeroV2.pt")) or os.path.exists(os.path.join(_possible_root2, "requirements.txt")):
+elif os.path.exists(os.path.join(_possible_root2, "MCZeroV3.pt")) or os.path.exists(os.path.join(_possible_root2, "requirements.txt")):
     _project_root = _possible_root2
     print(f"[PATH DEBUG] Using nested structure, root: {_project_root}")
 else:
@@ -56,7 +56,7 @@ if os.path.exists(_project_root):
     except Exception as e:
         print(f"[PATH DEBUG] Could not list root directory: {e}")
 
-MODEL_PATH = os.path.join(_project_root, "MCZeroV2.pt")
+MODEL_PATH = os.path.join(_project_root, "MCZeroV3.pt")
 
 print(f"[PATH DEBUG] Final model path: {MODEL_PATH}")
 
@@ -141,7 +141,7 @@ def _download_model_from_huggingface():
         from huggingface_hub import hf_hub_download
         
         hf_repo_id = os.environ.get("HF_MODEL_REPO", "Hiyo1256/chess-mcts-models")
-        hf_filename = "MCZeroV2.pt"
+        hf_filename = "MCZeroV3.pt"
         
         print(f"[INIT] Downloading {hf_filename} from {hf_repo_id}...")
         downloaded_path = hf_hub_download(
@@ -287,8 +287,13 @@ def one_step_mcts(board: Board, model: torch.jit.ScriptModule, lambda_weight=LAM
         raise ValueError("No legal moves available")
     
     move_scores = {}
+
+    sorted_moves = sorted(current_policy.items(), key=lambda x: x[1], reverse=True)
+
+    K = 6
+    moves_to_evaluate = sorted_moves[:K]
     
-    for move_uci, prob in current_policy.items():
+    for move_uci, prob in moves_to_evaluate:
         move = Move.from_uci(move_uci)
         b2 = board.copy()
         b2.push(move)
@@ -339,11 +344,5 @@ def mcts_move(ctx: GameContext):
 @chess_manager.reset
 def reset_func(ctx: GameContext):
     """Called when a new game begins."""
-    global _log_file, _model
+    global _log_file
     _log_file = _get_log_file()
-    try:
-        # Ensure model is loaded
-        if _model is None:
-            ensure_model_ready()
-    except:
-        _model = None
