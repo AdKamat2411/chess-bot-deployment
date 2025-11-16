@@ -54,7 +54,38 @@ else:
             except Exception as e:
                 print(f"[PATH DEBUG] Could not list root directory: {e}")
     
-    MCTS_BRIDGE_PATH = os.path.join(_project_root, "MCTS", "mcts_bridge")
+    # Try multiple possible locations for the bridge
+    possible_bridge_paths = [
+        os.path.join(_project_root, "MCTS", "mcts_bridge"),  # Standard location
+        os.path.join(_project_root, "mcts_bridge"),  # Root level (Docker-style)
+        os.path.join(_project_root, "MCTS", "Chess", "mcts_bridge"),  # In Chess subdirectory
+    ]
+    
+    MCTS_BRIDGE_PATH = None
+    for bridge_path in possible_bridge_paths:
+        if os.path.exists(bridge_path):
+            MCTS_BRIDGE_PATH = bridge_path
+            print(f"[PATH DEBUG] Found bridge at: {bridge_path}")
+            break
+    
+    if not MCTS_BRIDGE_PATH:
+        # Fallback to standard location even if it doesn't exist
+        MCTS_BRIDGE_PATH = possible_bridge_paths[0]
+        print(f"[PATH DEBUG] Bridge not found in any location, using: {MCTS_BRIDGE_PATH}")
+        # List MCTS directory contents for debugging
+        mcts_dir = os.path.join(_project_root, "MCTS")
+        if os.path.exists(mcts_dir):
+            try:
+                mcts_contents = os.listdir(mcts_dir)
+                print(f"[PATH DEBUG] MCTS directory contents: {mcts_contents}")
+                # Check if there are any executables
+                for item in mcts_contents:
+                    item_path = os.path.join(mcts_dir, item)
+                    if os.path.isfile(item_path) and os.access(item_path, os.X_OK):
+                        print(f"[PATH DEBUG] Found executable in MCTS/: {item}")
+            except Exception as e:
+                print(f"[PATH DEBUG] Could not list MCTS directory: {e}")
+    
     MODEL_PATH = os.path.join(_project_root, "MCZeroV1.pt")
     
     print(f"[PATH DEBUG] Final bridge path: {MCTS_BRIDGE_PATH}")
