@@ -8,8 +8,24 @@ import urllib.request
 import zipfile
 from datetime import datetime
 
-# Configuration
-# Path to the MCTS bridge executable
+# ============================================================================
+# GLOBAL STATE
+# ============================================================================
+
+MODEL_READY = False
+MODEL_PATH = None
+MCTS_BRIDGE_PATH = None
+_project_root = None
+
+# MCTS parameters
+MAX_ITERATIONS = 20000
+MAX_SECONDS = 1
+CPUCT = 1.5
+
+# ============================================================================
+# PATH DETECTION AND BRIDGE SETUP
+# ============================================================================
+
 # Try to find project root
 # Case 1: Separate deployment repo (MCTS/ is sibling of src/)
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -242,12 +258,110 @@ MODEL_PATH = os.path.join(_project_root, "MCZeroV1.pt")
 print(f"[PATH DEBUG] Final bridge path: {MCTS_BRIDGE_PATH}")
 print(f"[PATH DEBUG] Final model path: {MODEL_PATH}")
 
-# MCTS parameters
-MAX_ITERATIONS = 20000
-MAX_SECONDS = 1
-CPUCT = 1.5
+# ============================================================================
+# MODEL INITIALIZATION
+# ============================================================================
 
-# Logging configuration
+def ensure_model_ready():
+    """
+    Ensure the model file exists, is valid, and ready to use.
+    Downloads from HuggingFace if needed. Runs exactly once at startup.
+    """
+    global MODEL_READY, MODEL_PATH
+    
+    if MODEL_READY:
+        return
+    
+    print("[INIT] Checking model...")
+    
+    # 1. Check if model exists
+    if not os.path.exists(MODEL_PATH):
+        print(f"[INIT] Model file not found at {MODEL_PATH}")
+        _download_model_from_huggingface()
+    else:
+        # 2. Check file size - if too small (<1MB), download from HuggingFace
+        try:
+            model_size = os.path.getsize(MODEL_PATH)
+            print(f"[INIT] Model file size: {model_size} bytes ({model_size / (1024*1024):.2f} MB)")
+            
+            if model_size < 1024 * 1024:  # Less than 1MB is definitely wrong
+                print(f"[INIT] Model file is too small ({model_size} bytes) - downloading from HuggingFace")
+                _download_model_from_huggingface()
+        except Exception as e:
+            print(f"[INIT] WARNING: Could not check model file: {type(e).__name__}: {e}")
+            print(f"[INIT] Attempting to download from HuggingFace")
+            _download_model_from_huggingface()
+    
+    # 3. Validate final size
+    try:
+        model_size = os.path.getsize(MODEL_PATH)
+        if model_size < 1024 * 1024:
+            raise RuntimeError(f"Model file is still too small after download: {model_size} bytes")
+        print(f"[INIT] Model file validated: {model_size} bytes ({model_size / (1024*1024):.2f} MB)")
+    except Exception as e:
+        raise RuntimeError(f"Failed to validate model file: {type(e).__name__}: {e}")
+    
+    # 4. Try zip validation once (wrapped in try/except)
+    try:
+        with zipfile.ZipFile(MODEL_PATH, 'r') as zip_ref:
+            file_list = zip_ref.namelist()
+            if not file_list:
+                print(f"[INIT] WARNING: Model file appears to be an empty zip archive")
+            else:
+                print(f"[INIT] Model file validated as zip archive with {len(file_list)} files")
+    except zipfile.BadZipFile:
+        print(f"[INIT] WARNING: Model file is not a valid zip archive (PyTorch models are zip files)")
+        print(f"[INIT] WARNING: File may be corrupted, but will attempt to use anyway")
+    except Exception as e:
+        print(f"[INIT] WARNING: Could not validate model zip: {type(e).__name__}: {e}")
+        print(f"[INIT] Will attempt to use model anyway")
+    
+    # 5. Mark as ready
+    MODEL_READY = True
+    print("[INIT] Model ready.")
+
+
+def _download_model_from_huggingface():
+    """Download model from HuggingFace Hub. Called only during initialization."""
+    global MODEL_PATH
+    
+    print("[INIT] Downloading model from HuggingFace...")
+    try:
+        from huggingface_hub import hf_hub_download
+        
+        hf_repo_id = os.environ.get("HF_MODEL_REPO", "Hiyo1256/chess-mcts-models")
+        hf_filename = "MCZeroV1.pt"
+        
+        print(f"[INIT] Downloading {hf_filename} from {hf_repo_id}...")
+        downloaded_path = hf_hub_download(
+            repo_id=hf_repo_id,
+            filename=hf_filename,
+            local_dir=os.path.dirname(MODEL_PATH),
+            local_dir_use_symlinks=False
+        )
+        
+        # Move to expected location if needed
+        if downloaded_path != MODEL_PATH:
+            if os.path.exists(MODEL_PATH):
+                os.remove(MODEL_PATH)  # Remove old/corrupted file
+            shutil.move(downloaded_path, MODEL_PATH)
+        
+        print(f"[INIT] Model downloaded successfully from HuggingFace!")
+        model_size = os.path.getsize(MODEL_PATH)
+        print(f"[INIT] Downloaded model size: {model_size} bytes ({model_size / (1024*1024):.2f} MB)")
+        
+    except ImportError:
+        raise RuntimeError("huggingface_hub not installed. Install with: pip install huggingface_hub")
+    except Exception as e:
+        raise RuntimeError(f"Failed to download model from HuggingFace: {type(e).__name__}: {e}")
+
+# Initialize model at module import
+ensure_model_ready()
+
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
+
 # Try to create logs directory in appropriate location
 if os.path.exists(os.path.join(_project_root, "my-chesshacks-bot")):
     # Nested structure (ChessMirror/my-chesshacks-bot/)
@@ -273,6 +387,9 @@ def _log_to_file(message: str):
     except Exception as e:
         print(f"[MCTS] Failed to write to log file: {e}")
 
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
 
 def uci_to_move(board: Board, uci_str: str) -> Move:
     """Convert UCI string (e.g., 'e2e4') to python-chess Move object."""
@@ -289,12 +406,56 @@ def uci_to_move(board: Board, uci_str: str) -> Move:
         raise ValueError(f"Invalid UCI move format '{uci_str}': {e}")
 
 
+def run_bridge(fen: str) -> str:
+    """
+    Execute the MCTS bridge subprocess and return the UCI move string.
+    """
+    assert MODEL_READY, "Model not ready — initialization failed"
+    assert os.path.exists(MCTS_BRIDGE_PATH), f"Bridge not found at {MCTS_BRIDGE_PATH}"
+    
+    result = subprocess.run(
+        [
+            MCTS_BRIDGE_PATH,
+            MODEL_PATH,
+            fen,
+            str(MAX_ITERATIONS),
+            str(MAX_SECONDS),
+            str(CPUCT)
+        ],
+        capture_output=True,
+        text=True,
+        timeout=MAX_SECONDS + 10,  # Add buffer for overhead
+        check=True
+    )
+    
+    # Save debug output to log file
+    if result.stderr:
+        _log_to_file("=== MCTS Bridge Debug Output ===\n" + result.stderr)
+    
+    # Parse output (should be UCI move string)
+    uci_move = result.stdout.strip()
+    
+    if not uci_move:
+        # Check stderr for error messages
+        if result.stderr:
+            error_msg = result.stderr
+            raise RuntimeError(f"MCTS bridge error: {error_msg}")
+        raise RuntimeError("MCTS bridge returned empty output")
+    
+    return uci_move
+
+# ============================================================================
+# MOVE GENERATION
+# ============================================================================
+
 @chess_manager.entrypoint
 def mcts_move(ctx: GameContext):
     """
     Generate a move using MCTS + CNN.
     Calls the C++ MCTS engine via subprocess.
     """
+    assert MODEL_READY, "Model not ready — initialization failed"
+    
     # Get current board FEN
     fen = ctx.board.fen()
     
@@ -304,9 +465,9 @@ def mcts_move(ctx: GameContext):
         ctx.logProbabilities({})
         raise ValueError("No legal moves available")
     
-    # Debug: Print paths
+    # Debug: Print move request
     side_to_move = "White" if ctx.board.turn else "Black"
-    log_msg = f"=== Move Request ===\nSide to move: {side_to_move}\nFEN: {fen}\nBridge: {MCTS_BRIDGE_PATH}\nModel: {MODEL_PATH}"
+    log_msg = f"=== Move Request ===\nSide to move: {side_to_move}\nFEN: {fen}"
     print(log_msg)
     _log_to_file(log_msg)
     
@@ -321,132 +482,12 @@ def mcts_move(ctx: GameContext):
         ctx.logProbabilities(move_probs)
         return move
     
-    # Check if model exists and is valid
-    if not os.path.exists(MODEL_PATH):
-        print(f"[MCTS] ERROR: Model not found at {MODEL_PATH}")
-        print(f"[MCTS] Falling back to random move")
-        # Fallback to random move if model doesn't exist
-        import random
-        move = random.choice(legal_moves)
-        move_probs = {m: 1.0 / len(legal_moves) for m in legal_moves}
-        ctx.logProbabilities(move_probs)
-        return move
-    
-    # Check if model file exists and is valid, download from Hugging Face if needed
-    model_needs_download = False
-    if not os.path.exists(MODEL_PATH):
-        print(f"[MCTS] Model file not found at {MODEL_PATH}")
-        model_needs_download = True
-    else:
-        try:
-            model_size = os.path.getsize(MODEL_PATH)
-            print(f"[MCTS] Model file size: {model_size} bytes ({model_size / (1024*1024):.2f} MB)")
-            
-            # Check if it's suspiciously small (models should be > 1MB)
-            if model_size < 1024 * 1024:  # Less than 1MB is definitely wrong
-                print(f"[MCTS] WARNING: Model file is too small ({model_size} bytes) - likely corrupted or invalid")
-                model_needs_download = True
-        except Exception as e:
-            print(f"[MCTS] WARNING: Could not check model file: {type(e).__name__}: {e}")
-            model_needs_download = True
-    
-    # Try to download from Hugging Face if needed
-    if model_needs_download:
-        print(f"[MCTS] Attempting to download model from Hugging Face...")
-        try:
-            from huggingface_hub import hf_hub_download
-            
-            # Hugging Face repo for model download fallback
-            hf_repo_id = os.environ.get("HF_MODEL_REPO", "Hiyo1256/chess-mcts-models")
-            hf_filename = "MCZeroV1.pt"
-            
-            print(f"[MCTS] Downloading {hf_filename} from {hf_repo_id}...")
-            downloaded_path = hf_hub_download(
-                repo_id=hf_repo_id,
-                filename=hf_filename,
-                local_dir=os.path.dirname(MODEL_PATH),
-                local_dir_use_symlinks=False
-            )
-            
-            # Move to expected location if needed
-            if downloaded_path != MODEL_PATH:
-                if os.path.exists(MODEL_PATH):
-                    os.remove(MODEL_PATH)  # Remove old/corrupted file
-                shutil.move(downloaded_path, MODEL_PATH)
-            
-            print(f"[MCTS] Model downloaded successfully from Hugging Face!")
-            # Re-check file size
-            model_size = os.path.getsize(MODEL_PATH)
-            print(f"[MCTS] Downloaded model size: {model_size} bytes ({model_size / (1024*1024):.2f} MB)")
-        except ImportError:
-            print(f"[MCTS] ERROR: huggingface_hub not installed. Install with: pip install huggingface_hub")
-            print(f"[MCTS] Falling back to random move")
-            import random
-            move = random.choice(legal_moves)
-            move_probs = {m: 1.0 / len(legal_moves) for m in legal_moves}
-            ctx.logProbabilities(move_probs)
-            return move
-        except Exception as e:
-            print(f"[MCTS] ERROR: Failed to download model from Hugging Face: {type(e).__name__}: {e}")
-            print(f"[MCTS] Falling back to random move")
-            import random
-            move = random.choice(legal_moves)
-            move_probs = {m: 1.0 / len(legal_moves) for m in legal_moves}
-            ctx.logProbabilities(move_probs)
-            return move
-    
-    # Validate the model file is a valid zip archive (PyTorch models are zip files)
     try:
-        with zipfile.ZipFile(MODEL_PATH, 'r') as zip_ref:
-            # Check if it has the expected structure
-            file_list = zip_ref.namelist()
-            if not file_list:
-                print(f"[MCTS] WARNING: Model file appears to be an empty zip archive")
-            else:
-                print(f"[MCTS] Model file appears to be a valid zip archive with {len(file_list)} files")
-    except zipfile.BadZipFile:
-        print(f"[MCTS] WARNING: Model file is not a valid zip archive (PyTorch models are zip files)")
-        print(f"[MCTS] WARNING: File may be corrupted, but will attempt to load anyway")
-    except Exception as e:
-        print(f"[MCTS] WARNING: Could not validate model file: {type(e).__name__}: {e}")
-        print(f"[MCTS] Will attempt to use it anyway")
-    
-    try:
-        print(f"[MCTS] Calling bridge with: {MCTS_BRIDGE_PATH} {MODEL_PATH} {fen[:50]}...")
-        
         # Call MCTS bridge
-        result = subprocess.run(
-            [
-                MCTS_BRIDGE_PATH,
-                MODEL_PATH,
-                fen,
-                str(MAX_ITERATIONS),
-                str(MAX_SECONDS),
-                str(CPUCT)
-            ],
-            capture_output=True,
-            text=True,
-            timeout=MAX_SECONDS + 10,  # Add buffer for overhead
-            check=True
-        )
+        uci_move = run_bridge(fen)
         
-        # Save debug output to log file
-        if result.stderr:
-            print(f"[MCTS] Bridge stderr output saved to log")
-            _log_to_file("=== MCTS Bridge Debug Output ===\n" + result.stderr)
-        
-        # Parse output (should be UCI move string)
-        uci_move = result.stdout.strip()
         print(f"[MCTS] Bridge returned: {uci_move}")
         _log_to_file(f"Selected move: {uci_move}")
-        
-        if not uci_move:
-            # Check stderr for error messages
-            if result.stderr:
-                error_msg = result.stderr
-                print(f"[MCTS] ERROR: {error_msg}")
-                raise RuntimeError(f"MCTS bridge error: {error_msg}")
-            raise RuntimeError("MCTS bridge returned empty output")
         
         # Convert UCI to python-chess Move
         move = uci_to_move(ctx.board, uci_move)
@@ -466,7 +507,7 @@ def mcts_move(ctx: GameContext):
         return move
         
     except subprocess.TimeoutExpired:
-        error_msg = f"MCTS bridge timed out after {MAX_SECONDS + 5} seconds"
+        error_msg = f"MCTS bridge timed out after {MAX_SECONDS + 10} seconds"
         print(f"[MCTS] ERROR: {error_msg}")
         raise RuntimeError(error_msg)
     except subprocess.CalledProcessError as e:
