@@ -3,6 +3,7 @@ from chess import Move, Board
 import subprocess
 import os
 import sys
+import shutil
 from datetime import datetime
 
 # Configuration
@@ -69,7 +70,7 @@ else:
             break
     
     if not MCTS_BRIDGE_PATH or not os.path.exists(MCTS_BRIDGE_PATH):
-        # Bridge doesn't exist - try to build it
+        # Bridge doesn't exist - try to build it using subprocess
         MCTS_BRIDGE_PATH = possible_bridge_paths[0]
         mcts_dir = os.path.join(_project_root, "MCTS")
         makefile_path = os.path.join(mcts_dir, "Makefile")
@@ -80,37 +81,149 @@ else:
         
         # Check if we have the necessary files to build
         if os.path.exists(mcts_dir) and os.path.exists(makefile_path):
-            # Try to find LibTorch - check common locations
-            libtorch_paths = [
-                os.environ.get("LIBTORCH_PATH"),  # From environment variable
-                "/opt/libtorch",  # Docker default location
+            libtorch_path = None
+            libtorch_install_dir = "/opt/libtorch"
+            
+            # Step 1: Check if LibTorch exists, if not download it
+            libtorch_paths_to_check = [
+                os.environ.get("LIBTORCH_PATH"),
+                libtorch_install_dir,
                 "/usr/local/libtorch",
                 os.path.expanduser("~/libtorch"),
             ]
             
-            libtorch_path = None
-            for path in libtorch_paths:
+            for path in libtorch_paths_to_check:
                 if path and os.path.exists(path) and os.path.isdir(path):
                     libtorch_path = path
                     print(f"[BUILD] Found LibTorch at: {libtorch_path}")
                     break
             
-            # Check if build tools are available
-            build_tools_available = True
+            if not libtorch_path:
+                print(f"[BUILD] LibTorch not found, downloading...")
+                try:
+                    # Create install directory
+                    os.makedirs(os.path.dirname(libtorch_install_dir), exist_ok=True)
+                    
+                    # Download LibTorch CPU version
+                    libtorch_url = "https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-2.1.0%2Bcpu.zip"
+                    libtorch_zip = "/tmp/libtorch.zip"
+                    
+                    print(f"[BUILD] Downloading LibTorch from {libtorch_url}...")
+                    download_result = subprocess.run(
+                        ["wget", "-O", libtorch_zip, libtorch_url],
+                        capture_output=True,
+                        text=True,
+                        timeout=600  # 10 minute timeout for download
+                    )
+                    
+                    if download_result.returncode == 0:
+                        print(f"[BUILD] Extracting LibTorch...")
+                        # Extract LibTorch
+                        extract_result = subprocess.run(
+                            ["unzip", "-q", libtorch_zip, "-d", "/tmp"],
+                            capture_output=True,
+                            text=True,
+                            timeout=300
+                        )
+                        
+                        if extract_result.returncode == 0:
+                            # Move to final location
+                            if os.path.exists("/tmp/libtorch"):
+                                if os.path.exists(libtorch_install_dir):
+                                    shutil.rmtree(libtorch_install_dir)
+                                os.rename("/tmp/libtorch", libtorch_install_dir)
+                                libtorch_path = libtorch_install_dir
+                                print(f"[BUILD] LibTorch installed at: {libtorch_path}")
+                            else:
+                                print(f"[BUILD] ERROR: LibTorch extraction failed - /tmp/libtorch not found")
+                        else:
+                            print(f"[BUILD] ERROR: Failed to extract LibTorch: {extract_result.stderr}")
+                        
+                        # Clean up zip file
+                        try:
+                            os.remove(libtorch_zip)
+                        except:
+                            pass
+                    else:
+                        print(f"[BUILD] ERROR: Failed to download LibTorch: {download_result.stderr}")
+                        # Try curl as fallback
+                        print(f"[BUILD] Trying curl as fallback...")
+                        curl_result = subprocess.run(
+                            ["curl", "-L", "-o", libtorch_zip, libtorch_url],
+                            capture_output=True,
+                            text=True,
+                            timeout=600
+                        )
+                        if curl_result.returncode == 0:
+                            extract_result = subprocess.run(
+                                ["unzip", "-q", libtorch_zip, "-d", "/tmp"],
+                                capture_output=True,
+                                text=True,
+                                timeout=300
+                            )
+                            if extract_result.returncode == 0 and os.path.exists("/tmp/libtorch"):
+                                if os.path.exists(libtorch_install_dir):
+                                    shutil.rmtree(libtorch_install_dir)
+                                os.rename("/tmp/libtorch", libtorch_install_dir)
+                                libtorch_path = libtorch_install_dir
+                                print(f"[BUILD] LibTorch installed at: {libtorch_path}")
+                        try:
+                            os.remove(libtorch_zip)
+                        except:
+                            pass
+                except subprocess.TimeoutExpired:
+                    print(f"[BUILD] ERROR: Download/extraction timed out")
+                except Exception as e:
+                    print(f"[BUILD] ERROR: Exception during LibTorch installation: {type(e).__name__}: {e}")
+            
+            # Step 2: Check and install build tools if needed
+            build_tools_available = False
             try:
                 subprocess.run(["which", "g++"], capture_output=True, check=True)
                 subprocess.run(["which", "make"], capture_output=True, check=True)
+                build_tools_available = True
                 print(f"[BUILD] Build tools (g++, make) are available")
             except (subprocess.CalledProcessError, FileNotFoundError):
-                build_tools_available = False
-                print(f"[BUILD] WARNING: Build tools (g++, make) not found")
+                print(f"[BUILD] Build tools not found, attempting to install...")
+                try:
+                    # Try to install build tools (this requires sudo/root, may fail)
+                    install_result = subprocess.run(
+                        ["apt-get", "update"],
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+                    if install_result.returncode == 0:
+                        install_result = subprocess.run(
+                            ["apt-get", "install", "-y", "build-essential", "wget", "unzip"],
+                            capture_output=True,
+                            text=True,
+                            timeout=600
+                        )
+                        if install_result.returncode == 0:
+                            build_tools_available = True
+                            print(f"[BUILD] Build tools installed successfully")
+                        else:
+                            print(f"[BUILD] WARNING: Failed to install build tools: {install_result.stderr}")
+                    else:
+                        print(f"[BUILD] WARNING: Failed to update package list: {install_result.stderr}")
+                except subprocess.TimeoutExpired:
+                    print(f"[BUILD] WARNING: Build tools installation timed out")
+                except Exception as e:
+                    print(f"[BUILD] WARNING: Could not install build tools: {type(e).__name__}: {e}")
             
-            # Attempt to build if we have LibTorch and build tools
+            # Step 3: Build the bridge if we have everything
             if libtorch_path and build_tools_available:
                 print(f"[BUILD] Attempting to build bridge with LIBTORCH_PATH={libtorch_path}")
                 try:
                     env = os.environ.copy()
                     env["LIBTORCH_PATH"] = libtorch_path
+                    # Set LD_LIBRARY_PATH for runtime
+                    lib_path = os.path.join(libtorch_path, "lib")
+                    if "LD_LIBRARY_PATH" in env:
+                        env["LD_LIBRARY_PATH"] = f"{lib_path}:{env['LD_LIBRARY_PATH']}"
+                    else:
+                        env["LD_LIBRARY_PATH"] = lib_path
                     
                     build_result = subprocess.run(
                         ["make", "Bridge"],
@@ -118,7 +231,7 @@ else:
                         env=env,
                         capture_output=True,
                         text=True,
-                        timeout=300  # 5 minute timeout
+                        timeout=600  # 10 minute timeout for build
                     )
                     
                     if build_result.returncode == 0:
@@ -140,14 +253,14 @@ else:
                         if build_result.stderr:
                             print(f"[BUILD] Build stderr: {build_result.stderr}")
                 except subprocess.TimeoutExpired:
-                    print(f"[BUILD] ERROR: Build timed out after 5 minutes")
+                    print(f"[BUILD] ERROR: Build timed out after 10 minutes")
                 except Exception as e:
                     print(f"[BUILD] ERROR: Exception during build: {type(e).__name__}: {e}")
             else:
                 if not libtorch_path:
-                    print(f"[BUILD] ERROR: LibTorch not found. Checked: {libtorch_paths}")
+                    print(f"[BUILD] ERROR: LibTorch not available - cannot build bridge")
                 if not build_tools_available:
-                    print(f"[BUILD] ERROR: Build tools not available")
+                    print(f"[BUILD] ERROR: Build tools not available - cannot build bridge")
         else:
             print(f"[BUILD] ERROR: Cannot build - MCTS directory or Makefile not found")
         
