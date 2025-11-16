@@ -330,7 +330,7 @@ def mcts_move(ctx: GameContext):
         ctx.logProbabilities(move_probs)
         return move
     
-    # Check if model exists
+    # Check if model exists and is valid
     if not os.path.exists(MODEL_PATH):
         print(f"[MCTS] ERROR: Model not found at {MODEL_PATH}")
         print(f"[MCTS] Falling back to random move")
@@ -340,6 +340,51 @@ def mcts_move(ctx: GameContext):
         move_probs = {m: 1.0 / len(legal_moves) for m in legal_moves}
         ctx.logProbabilities(move_probs)
         return move
+    
+    # Validate model file - check if it's a Git LFS pointer or corrupted
+    try:
+        model_size = os.path.getsize(MODEL_PATH)
+        print(f"[MCTS] Model file size: {model_size} bytes ({model_size / (1024*1024):.2f} MB)")
+        
+        # Check if it's suspiciously small (Git LFS pointer files are ~130 bytes)
+        if model_size < 1024:  # Less than 1KB is definitely wrong
+            print(f"[MCTS] ERROR: Model file is too small ({model_size} bytes) - likely a Git LFS pointer file")
+            print(f"[MCTS] ERROR: The actual model file needs to be pulled from Git LFS")
+            print(f"[MCTS] Falling back to random move")
+            import random
+            move = random.choice(legal_moves)
+            move_probs = {m: 1.0 / len(legal_moves) for m in legal_moves}
+            ctx.logProbabilities(move_probs)
+            return move
+        
+        # Check if it's a Git LFS pointer file (starts with "version https://git-lfs.github.com/spec/v1")
+        with open(MODEL_PATH, 'rb') as f:
+            first_bytes = f.read(100)
+            if first_bytes.startswith(b'version https://git-lfs.github.com/spec/v1'):
+                print(f"[MCTS] ERROR: Model file is a Git LFS pointer, not the actual model")
+                print(f"[MCTS] ERROR: Run 'git lfs pull' to download the actual model file")
+                print(f"[MCTS] Falling back to random move")
+                import random
+                move = random.choice(legal_moves)
+                move_probs = {m: 1.0 / len(legal_moves) for m in legal_moves}
+                ctx.logProbabilities(move_probs)
+                return move
+        
+        # Try to validate it's a valid zip file (PyTorch models are zip archives)
+        try:
+            with zipfile.ZipFile(MODEL_PATH, 'r') as zip_ref:
+                # Check if it has the expected structure
+                file_list = zip_ref.namelist()
+                if not file_list:
+                    print(f"[MCTS] WARNING: Model file appears to be an empty zip archive")
+                else:
+                    print(f"[MCTS] Model file appears to be a valid zip archive with {len(file_list)} files")
+        except zipfile.BadZipFile:
+            print(f"[MCTS] WARNING: Model file is not a valid zip archive (PyTorch models are zip files)")
+            print(f"[MCTS] WARNING: File may be corrupted, but will attempt to load anyway")
+    except Exception as e:
+        print(f"[MCTS] WARNING: Could not validate model file: {type(e).__name__}: {e}")
+        print(f"[MCTS] Will attempt to use it anyway")
     
     try:
         print(f"[MCTS] Calling bridge with: {MCTS_BRIDGE_PATH} {MODEL_PATH} {fen[:50]}...")
