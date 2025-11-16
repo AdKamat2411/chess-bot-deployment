@@ -57,9 +57,10 @@ ENV LIBTORCH_PATH=/opt/libtorch
 ENV LD_LIBRARY_PATH=/opt/libtorch/lib:$LD_LIBRARY_PATH
 ```
 
-**Note:** 
+**Important Notes:** 
 - LibTorch cannot be installed via `apt-get` - it must be downloaded from PyTorch's website
 - If LibTorch is not pre-installed, the bot will automatically download it at runtime using Python (slower first startup, but works)
+- **Git LFS Required**: The model file `MCZeroV1.pt` is stored in Git LFS. The deployment system MUST run `git lfs pull` after cloning to get the actual model file (not just the pointer). If Git LFS is not configured, the bot will detect this and fall back to random moves.
 
 ## Local Testing
 
