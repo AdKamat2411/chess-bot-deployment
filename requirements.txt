@@ -8,6 +8,7 @@ fastapi==0.121.2
 h11==0.16.0
 huggingface_hub>=0.20.0
 idna==3.11
+torch>=2.0.0
 pydantic==2.12.4
 pydantic_core==2.41.5
 python-chess==1.999

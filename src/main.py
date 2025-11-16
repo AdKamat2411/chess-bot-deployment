@@ -7,7 +7,6 @@ import urllib.request
 import zipfile
 from datetime import datetime
 import torch
-import numpy as np
 
 # ============================================================================
 # GLOBAL STATE
