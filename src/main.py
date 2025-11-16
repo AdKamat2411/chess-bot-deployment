@@ -141,7 +141,7 @@ def _download_model_from_huggingface():
         from huggingface_hub import hf_hub_download
         
         hf_repo_id = os.environ.get("HF_MODEL_REPO", "Hiyo1256/chess-mcts-models")
-        hf_filename = "MCZeroV2.pt"
+        hf_filename = "MCZeroV3.pt"
         
         print(f"[INIT] Downloading {hf_filename} from {hf_repo_id}...")
         downloaded_path = hf_hub_download(
