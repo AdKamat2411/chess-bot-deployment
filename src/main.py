@@ -69,30 +69,103 @@ else:
             break
     
     if not MCTS_BRIDGE_PATH or not os.path.exists(MCTS_BRIDGE_PATH):
-        # Bridge doesn't exist - this means it hasn't been built
+        # Bridge doesn't exist - try to build it
         MCTS_BRIDGE_PATH = possible_bridge_paths[0]
-        print(f"[PATH DEBUG] Bridge not found in any location, using: {MCTS_BRIDGE_PATH}")
-        # List MCTS directory contents for debugging
         mcts_dir = os.path.join(_project_root, "MCTS")
-        if os.path.exists(mcts_dir):
-            try:
-                mcts_contents = os.listdir(mcts_dir)
-                print(f"[PATH DEBUG] MCTS directory contents: {mcts_contents}")
-                # Check if there are any executables
-                for item in mcts_contents:
-                    item_path = os.path.join(mcts_dir, item)
-                    if os.path.isfile(item_path) and os.access(item_path, os.X_OK):
-                        print(f"[PATH DEBUG] Found executable in MCTS/: {item}")
-            except Exception as e:
-                print(f"[PATH DEBUG] Could not list MCTS directory: {e}")
+        makefile_path = os.path.join(mcts_dir, "Makefile")
         
-        # Check if we're in a deployment environment (not Docker)
-        if "/tmp/deployments/" in _project_root:
-            print(f"[ERROR] MCTS bridge executable not found!")
-            print(f"[ERROR] The deployment environment has extracted the source code but hasn't built the C++ executable.")
-            print(f"[ERROR] The bridge needs to be compiled using: cd {mcts_dir} && LIBTORCH_PATH=/path/to/libtorch make Bridge")
-            print(f"[ERROR] This requires: build tools (g++, make), LibTorch libraries, and proper LIBTORCH_PATH")
-            print(f"[ERROR] The deployment system should build this via Docker, but it appears to be running outside Docker.")
+        print(f"[BUILD] Bridge not found, attempting to build it...")
+        print(f"[BUILD] MCTS directory: {mcts_dir}")
+        print(f"[BUILD] Target bridge path: {MCTS_BRIDGE_PATH}")
+        
+        # Check if we have the necessary files to build
+        if os.path.exists(mcts_dir) and os.path.exists(makefile_path):
+            # Try to find LibTorch - check common locations
+            libtorch_paths = [
+                os.environ.get("LIBTORCH_PATH"),  # From environment variable
+                "/opt/libtorch",  # Docker default location
+                "/usr/local/libtorch",
+                os.path.expanduser("~/libtorch"),
+            ]
+            
+            libtorch_path = None
+            for path in libtorch_paths:
+                if path and os.path.exists(path) and os.path.isdir(path):
+                    libtorch_path = path
+                    print(f"[BUILD] Found LibTorch at: {libtorch_path}")
+                    break
+            
+            # Check if build tools are available
+            build_tools_available = True
+            try:
+                subprocess.run(["which", "g++"], capture_output=True, check=True)
+                subprocess.run(["which", "make"], capture_output=True, check=True)
+                print(f"[BUILD] Build tools (g++, make) are available")
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                build_tools_available = False
+                print(f"[BUILD] WARNING: Build tools (g++, make) not found")
+            
+            # Attempt to build if we have LibTorch and build tools
+            if libtorch_path and build_tools_available:
+                print(f"[BUILD] Attempting to build bridge with LIBTORCH_PATH={libtorch_path}")
+                try:
+                    env = os.environ.copy()
+                    env["LIBTORCH_PATH"] = libtorch_path
+                    
+                    build_result = subprocess.run(
+                        ["make", "Bridge"],
+                        cwd=mcts_dir,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=300  # 5 minute timeout
+                    )
+                    
+                    if build_result.returncode == 0:
+                        # Check if the bridge was successfully built
+                        if os.path.exists(MCTS_BRIDGE_PATH):
+                            print(f"[BUILD] SUCCESS! Bridge built at: {MCTS_BRIDGE_PATH}")
+                            # Make sure it's executable
+                            os.chmod(MCTS_BRIDGE_PATH, 0o755)
+                        else:
+                            print(f"[BUILD] WARNING: Build completed but bridge not found at expected location")
+                            if build_result.stdout:
+                                print(f"[BUILD] Build stdout: {build_result.stdout}")
+                            if build_result.stderr:
+                                print(f"[BUILD] Build stderr: {build_result.stderr}")
+                    else:
+                        print(f"[BUILD] Build failed with return code {build_result.returncode}")
+                        if build_result.stdout:
+                            print(f"[BUILD] Build stdout: {build_result.stdout}")
+                        if build_result.stderr:
+                            print(f"[BUILD] Build stderr: {build_result.stderr}")
+                except subprocess.TimeoutExpired:
+                    print(f"[BUILD] ERROR: Build timed out after 5 minutes")
+                except Exception as e:
+                    print(f"[BUILD] ERROR: Exception during build: {type(e).__name__}: {e}")
+            else:
+                if not libtorch_path:
+                    print(f"[BUILD] ERROR: LibTorch not found. Checked: {libtorch_paths}")
+                if not build_tools_available:
+                    print(f"[BUILD] ERROR: Build tools not available")
+        else:
+            print(f"[BUILD] ERROR: Cannot build - MCTS directory or Makefile not found")
+        
+        # Final check - did we successfully build it?
+        if not os.path.exists(MCTS_BRIDGE_PATH):
+            print(f"[BUILD] Bridge still not found after build attempt")
+            # List MCTS directory contents for debugging
+            if os.path.exists(mcts_dir):
+                try:
+                    mcts_contents = os.listdir(mcts_dir)
+                    print(f"[PATH DEBUG] MCTS directory contents: {mcts_contents}")
+                    # Check if there are any executables
+                    for item in mcts_contents:
+                        item_path = os.path.join(mcts_dir, item)
+                        if os.path.isfile(item_path) and os.access(item_path, os.X_OK):
+                            print(f"[PATH DEBUG] Found executable in MCTS/: {item}")
+                except Exception as e:
+                    print(f"[PATH DEBUG] Could not list MCTS directory: {e}")
     
     MODEL_PATH = os.path.join(_project_root, "MCZeroV1.pt")
     
