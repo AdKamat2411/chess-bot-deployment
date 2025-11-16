@@ -4,6 +4,8 @@ import subprocess
 import os
 import sys
 import shutil
+import urllib.request
+import zipfile
 from datetime import datetime
 
 # Configuration
@@ -85,9 +87,11 @@ else:
             libtorch_install_dir = "/opt/libtorch"
             
             # Step 1: Check if LibTorch exists, if not download it
+            # Note: LibTorch cannot be installed via apt-get - it must be downloaded from PyTorch
+            # Competition organizers can pre-install it in their Docker image to speed up startup
             libtorch_paths_to_check = [
-                os.environ.get("LIBTORCH_PATH"),
-                libtorch_install_dir,
+                os.environ.get("LIBTORCH_PATH"),  # Check environment variable first
+                libtorch_install_dir,  # /opt/libtorch (standard location)
                 "/usr/local/libtorch",
                 os.path.expanduser("~/libtorch"),
             ]
@@ -95,88 +99,74 @@ else:
             for path in libtorch_paths_to_check:
                 if path and os.path.exists(path) and os.path.isdir(path):
                     libtorch_path = path
-                    print(f"[BUILD] Found LibTorch at: {libtorch_path}")
+                    print(f"[BUILD] Found pre-installed LibTorch at: {libtorch_path}")
                     break
             
             if not libtorch_path:
-                print(f"[BUILD] LibTorch not found, downloading...")
+                print(f"[BUILD] LibTorch not found, downloading using Python...")
                 try:
                     # Create install directory
                     os.makedirs(os.path.dirname(libtorch_install_dir), exist_ok=True)
                     
-                    # Download LibTorch CPU version
+                    # Download LibTorch CPU version using Python urllib
                     libtorch_url = "https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-2.1.0%2Bcpu.zip"
                     libtorch_zip = "/tmp/libtorch.zip"
                     
                     print(f"[BUILD] Downloading LibTorch from {libtorch_url}...")
-                    download_result = subprocess.run(
-                        ["wget", "-O", libtorch_zip, libtorch_url],
-                        capture_output=True,
-                        text=True,
-                        timeout=600  # 10 minute timeout for download
-                    )
+                    print(f"[BUILD] This may take a few minutes (~200MB download)...")
                     
-                    if download_result.returncode == 0:
-                        print(f"[BUILD] Extracting LibTorch...")
-                        # Extract LibTorch
-                        extract_result = subprocess.run(
-                            ["unzip", "-q", libtorch_zip, "-d", "/tmp"],
-                            capture_output=True,
-                            text=True,
-                            timeout=300
-                        )
+                    # Download using urllib.request (built-in, no external dependencies)
+                    def show_progress(block_num, block_size, total_size):
+                        downloaded = block_num * block_size
+                        percent = min(100, (downloaded / total_size) * 100) if total_size > 0 else 0
+                        if block_num % 100 == 0:  # Print every 100 blocks to avoid spam
+                            print(f"[BUILD] Download progress: {percent:.1f}% ({downloaded / (1024*1024):.1f} MB / {total_size / (1024*1024):.1f} MB)")
+                    
+                    try:
+                        urllib.request.urlretrieve(libtorch_url, libtorch_zip, show_progress)
+                        print(f"[BUILD] Download complete, extracting...")
+                    except Exception as e:
+                        print(f"[BUILD] ERROR: Failed to download LibTorch: {type(e).__name__}: {e}")
+                        raise
+                    
+                    # Extract using Python's zipfile module (built-in, no external dependencies)
+                    try:
+                        with zipfile.ZipFile(libtorch_zip, 'r') as zip_ref:
+                            print(f"[BUILD] Extracting LibTorch to /tmp...")
+                            zip_ref.extractall("/tmp")
                         
-                        if extract_result.returncode == 0:
-                            # Move to final location
-                            if os.path.exists("/tmp/libtorch"):
-                                if os.path.exists(libtorch_install_dir):
-                                    shutil.rmtree(libtorch_install_dir)
-                                os.rename("/tmp/libtorch", libtorch_install_dir)
-                                libtorch_path = libtorch_install_dir
-                                print(f"[BUILD] LibTorch installed at: {libtorch_path}")
-                            else:
-                                print(f"[BUILD] ERROR: LibTorch extraction failed - /tmp/libtorch not found")
+                        # Move to final location
+                        if os.path.exists("/tmp/libtorch"):
+                            if os.path.exists(libtorch_install_dir):
+                                shutil.rmtree(libtorch_install_dir)
+                            os.rename("/tmp/libtorch", libtorch_install_dir)
+                            libtorch_path = libtorch_install_dir
+                            print(f"[BUILD] LibTorch installed at: {libtorch_path}")
                         else:
-                            print(f"[BUILD] ERROR: Failed to extract LibTorch: {extract_result.stderr}")
+                            print(f"[BUILD] ERROR: LibTorch extraction failed - /tmp/libtorch not found")
+                            # List what was extracted
+                            try:
+                                extracted = os.listdir("/tmp")
+                                print(f"[BUILD] Contents of /tmp: {extracted}")
+                            except:
+                                pass
+                    except Exception as e:
+                        print(f"[BUILD] ERROR: Failed to extract LibTorch: {type(e).__name__}: {e}")
+                        raise
+                    
+                    # Clean up zip file
+                    try:
+                        os.remove(libtorch_zip)
+                    except:
+                        pass
                         
-                        # Clean up zip file
-                        try:
-                            os.remove(libtorch_zip)
-                        except:
-                            pass
-                    else:
-                        print(f"[BUILD] ERROR: Failed to download LibTorch: {download_result.stderr}")
-                        # Try curl as fallback
-                        print(f"[BUILD] Trying curl as fallback...")
-                        curl_result = subprocess.run(
-                            ["curl", "-L", "-o", libtorch_zip, libtorch_url],
-                            capture_output=True,
-                            text=True,
-                            timeout=600
-                        )
-                        if curl_result.returncode == 0:
-                            extract_result = subprocess.run(
-                                ["unzip", "-q", libtorch_zip, "-d", "/tmp"],
-                                capture_output=True,
-                                text=True,
-                                timeout=300
-                            )
-                            if extract_result.returncode == 0 and os.path.exists("/tmp/libtorch"):
-                                if os.path.exists(libtorch_install_dir):
-                                    shutil.rmtree(libtorch_install_dir)
-                                os.rename("/tmp/libtorch", libtorch_install_dir)
-                                libtorch_path = libtorch_install_dir
-                                print(f"[BUILD] LibTorch installed at: {libtorch_path}")
-                        try:
-                            os.remove(libtorch_zip)
-                        except:
-                            pass
-                except subprocess.TimeoutExpired:
-                    print(f"[BUILD] ERROR: Download/extraction timed out")
                 except Exception as e:
                     print(f"[BUILD] ERROR: Exception during LibTorch installation: {type(e).__name__}: {e}")
+                    import traceback
+                    print(f"[BUILD] Traceback: {traceback.format_exc()}")
             
-            # Step 2: Check and install build tools if needed
+            # Step 2: Check if build tools are available
+            # Note: In Modal, build tools should be pre-installed by organizers
             build_tools_available = False
             try:
                 subprocess.run(["which", "g++"], capture_output=True, check=True)
@@ -184,33 +174,9 @@ else:
                 build_tools_available = True
                 print(f"[BUILD] Build tools (g++, make) are available")
             except (subprocess.CalledProcessError, FileNotFoundError):
-                print(f"[BUILD] Build tools not found, attempting to install...")
-                try:
-                    # Try to install build tools (this requires sudo/root, may fail)
-                    install_result = subprocess.run(
-                        ["apt-get", "update"],
-                        capture_output=True,
-                        text=True,
-                        timeout=300
-                    )
-                    if install_result.returncode == 0:
-                        install_result = subprocess.run(
-                            ["apt-get", "install", "-y", "build-essential", "wget", "unzip"],
-                            capture_output=True,
-                            text=True,
-                            timeout=600
-                        )
-                        if install_result.returncode == 0:
-                            build_tools_available = True
-                            print(f"[BUILD] Build tools installed successfully")
-                        else:
-                            print(f"[BUILD] WARNING: Failed to install build tools: {install_result.stderr}")
-                    else:
-                        print(f"[BUILD] WARNING: Failed to update package list: {install_result.stderr}")
-                except subprocess.TimeoutExpired:
-                    print(f"[BUILD] WARNING: Build tools installation timed out")
-                except Exception as e:
-                    print(f"[BUILD] WARNING: Could not install build tools: {type(e).__name__}: {e}")
+                print(f"[BUILD] ERROR: Build tools (g++, make) not found")
+                print(f"[BUILD] Organizers need to pre-install: build-essential")
+                # Don't try to install via apt-get in Modal - it's not supported
             
             # Step 3: Build the bridge if we have everything
             if libtorch_path and build_tools_available:

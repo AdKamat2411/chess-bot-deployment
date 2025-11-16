@@ -22,6 +22,45 @@ This repository is configured for ChessHacks deployment:
    - Compile the C++ MCTS engine
    - Run your bot
 
+### For Competition Organizers (Modal/Deployment Platform)
+
+**Minimum Required:**
+```dockerfile
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+**What's needed:**
+- `build-essential`: Contains `g++`, `make`, and other C++ build tools (REQUIRED)
+
+**What's NOT needed:**
+- `wget` or `curl`: Bot uses Python's built-in `urllib` to download LibTorch
+- `unzip`: Bot uses Python's built-in `zipfile` to extract LibTorch
+
+**Optional (for faster startup):**
+If you want to pre-install LibTorch to avoid runtime download (~200MB, takes a few minutes):
+```dockerfile
+# Install build tools
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install LibTorch (CPU version, ~200MB)
+# Note: You can use Python to download if wget isn't available
+RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-2.1.0%2Bcpu.zip', '/tmp/libtorch.zip')" \
+    && python3 -c "import zipfile; zipfile.ZipFile('/tmp/libtorch.zip').extractall('/tmp')" \
+    && mv /tmp/libtorch /opt/libtorch \
+    && rm /tmp/libtorch.zip
+
+ENV LIBTORCH_PATH=/opt/libtorch
+ENV LD_LIBRARY_PATH=/opt/libtorch/lib:$LD_LIBRARY_PATH
+```
+
+**Note:** 
+- LibTorch cannot be installed via `apt-get` - it must be downloaded from PyTorch's website
+- If LibTorch is not pre-installed, the bot will automatically download it at runtime using Python (slower first startup, but works)
+
 ## Local Testing
 
 If you have Docker installed:
