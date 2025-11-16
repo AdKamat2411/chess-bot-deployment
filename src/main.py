@@ -290,7 +290,7 @@ def one_step_mcts(board: Board, model: torch.jit.ScriptModule, lambda_weight=LAM
 
     sorted_moves = sorted(current_policy.items(), key=lambda x: x[1], reverse=True)
 
-    K = 6
+    K = 4
     moves_to_evaluate = sorted_moves[:K]
     
     for move_uci, prob in moves_to_evaluate:
