@@ -342,46 +342,85 @@ def mcts_move(ctx: GameContext):
         return move
     
     # Validate model file - check if it's a Git LFS pointer or corrupted
+    # If it's a pointer or missing, try to download from Hugging Face
+    model_needs_download = False
     try:
         model_size = os.path.getsize(MODEL_PATH)
         print(f"[MCTS] Model file size: {model_size} bytes ({model_size / (1024*1024):.2f} MB)")
         
         # Check if it's suspiciously small (Git LFS pointer files are ~130 bytes)
         if model_size < 1024:  # Less than 1KB is definitely wrong
-            print(f"[MCTS] ERROR: Model file is too small ({model_size} bytes) - likely a Git LFS pointer file")
-            print(f"[MCTS] ERROR: The actual model file needs to be pulled from Git LFS")
+            print(f"[MCTS] WARNING: Model file is too small ({model_size} bytes) - likely a Git LFS pointer file")
+            model_needs_download = True
+        
+        # Check if it's a Git LFS pointer file (starts with "version https://git-lfs.github.com/spec/v1")
+        if not model_needs_download:
+            with open(MODEL_PATH, 'rb') as f:
+                first_bytes = f.read(100)
+                if first_bytes.startswith(b'version https://git-lfs.github.com/spec/v1'):
+                    print(f"[MCTS] WARNING: Model file is a Git LFS pointer, not the actual model")
+                    model_needs_download = True
+    except Exception as e:
+        print(f"[MCTS] WARNING: Could not check model file: {type(e).__name__}: {e}")
+        model_needs_download = True
+    
+    # Try to download from Hugging Face if needed
+    if model_needs_download:
+        print(f"[MCTS] Attempting to download model from Hugging Face...")
+        try:
+            from huggingface_hub import hf_hub_download
+            
+            # Hugging Face repo for model download fallback
+            hf_repo_id = os.environ.get("HF_MODEL_REPO", "Hiyo1256/chess-mcts-models")
+            hf_filename = "MCZeroV1.pt"
+            
+            print(f"[MCTS] Downloading {hf_filename} from {hf_repo_id}...")
+            downloaded_path = hf_hub_download(
+                repo_id=hf_repo_id,
+                filename=hf_filename,
+                local_dir=os.path.dirname(MODEL_PATH),
+                local_dir_use_symlinks=False
+            )
+            
+            # Move to expected location if needed
+            if downloaded_path != MODEL_PATH:
+                if os.path.exists(MODEL_PATH):
+                    os.remove(MODEL_PATH)  # Remove pointer file
+                shutil.move(downloaded_path, MODEL_PATH)
+            
+            print(f"[MCTS] Model downloaded successfully from Hugging Face!")
+            # Re-check file size
+            model_size = os.path.getsize(MODEL_PATH)
+            print(f"[MCTS] Downloaded model size: {model_size} bytes ({model_size / (1024*1024):.2f} MB)")
+        except ImportError:
+            print(f"[MCTS] ERROR: huggingface_hub not installed. Install with: pip install huggingface_hub")
             print(f"[MCTS] Falling back to random move")
             import random
             move = random.choice(legal_moves)
             move_probs = {m: 1.0 / len(legal_moves) for m in legal_moves}
             ctx.logProbabilities(move_probs)
             return move
-        
-        # Check if it's a Git LFS pointer file (starts with "version https://git-lfs.github.com/spec/v1")
-        with open(MODEL_PATH, 'rb') as f:
-            first_bytes = f.read(100)
-            if first_bytes.startswith(b'version https://git-lfs.github.com/spec/v1'):
-                print(f"[MCTS] ERROR: Model file is a Git LFS pointer, not the actual model")
-                print(f"[MCTS] ERROR: Run 'git lfs pull' to download the actual model file")
-                print(f"[MCTS] Falling back to random move")
-                import random
-                move = random.choice(legal_moves)
-                move_probs = {m: 1.0 / len(legal_moves) for m in legal_moves}
-                ctx.logProbabilities(move_probs)
-                return move
-        
-        # Try to validate it's a valid zip file (PyTorch models are zip archives)
-        try:
-            with zipfile.ZipFile(MODEL_PATH, 'r') as zip_ref:
-                # Check if it has the expected structure
-                file_list = zip_ref.namelist()
-                if not file_list:
-                    print(f"[MCTS] WARNING: Model file appears to be an empty zip archive")
-                else:
-                    print(f"[MCTS] Model file appears to be a valid zip archive with {len(file_list)} files")
-        except zipfile.BadZipFile:
-            print(f"[MCTS] WARNING: Model file is not a valid zip archive (PyTorch models are zip files)")
-            print(f"[MCTS] WARNING: File may be corrupted, but will attempt to load anyway")
+        except Exception as e:
+            print(f"[MCTS] ERROR: Failed to download model from Hugging Face: {type(e).__name__}: {e}")
+            print(f"[MCTS] Falling back to random move")
+            import random
+            move = random.choice(legal_moves)
+            move_probs = {m: 1.0 / len(legal_moves) for m in legal_moves}
+            ctx.logProbabilities(move_probs)
+            return move
+    
+    # Validate the model file is a valid zip archive (PyTorch models are zip files)
+    try:
+        with zipfile.ZipFile(MODEL_PATH, 'r') as zip_ref:
+            # Check if it has the expected structure
+            file_list = zip_ref.namelist()
+            if not file_list:
+                print(f"[MCTS] WARNING: Model file appears to be an empty zip archive")
+            else:
+                print(f"[MCTS] Model file appears to be a valid zip archive with {len(file_list)} files")
+    except zipfile.BadZipFile:
+        print(f"[MCTS] WARNING: Model file is not a valid zip archive (PyTorch models are zip files)")
+        print(f"[MCTS] WARNING: File may be corrupted, but will attempt to load anyway")
     except Exception as e:
         print(f"[MCTS] WARNING: Could not validate model file: {type(e).__name__}: {e}")
         print(f"[MCTS] Will attempt to use it anyway")
