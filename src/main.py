@@ -17,6 +17,9 @@ MODEL_PATH = None
 _model = None
 _project_root = None
 
+# One-Step MCTS parameters
+LAMBDA = 1.0  # Weight for value difference in PUCT formula
+
 # ============================================================================
 # PATH DETECTION
 # ============================================================================
@@ -44,13 +47,14 @@ else:
     # Fallback: assume separate repo structure
     _project_root = _possible_root1
     print(f"[PATH DEBUG] Fallback to separate repo structure, root: {_project_root}")
-    # List directory contents for debugging
-    if os.path.exists(_project_root):
-        try:
-            contents = os.listdir(_project_root)
-            print(f"[PATH DEBUG] Root directory contents: {contents}")
-        except Exception as e:
-            print(f"[PATH DEBUG] Could not list root directory: {e}")
+
+# List directory contents for debugging
+if os.path.exists(_project_root):
+    try:
+        contents = os.listdir(_project_root)
+        print(f"[PATH DEBUG] Root directory contents: {contents}")
+    except Exception as e:
+        print(f"[PATH DEBUG] Could not list root directory: {e}")
 
 MODEL_PATH = os.path.join(_project_root, "MCZeroV1.pt")
 
@@ -137,7 +141,7 @@ def _download_model_from_huggingface():
         from huggingface_hub import hf_hub_download
         
         hf_repo_id = os.environ.get("HF_MODEL_REPO", "Hiyo1256/chess-mcts-models")
-        hf_filename = "MCZeroV1.pt"
+        hf_filename = "MCZeroV2.pt"
         
         print(f"[INIT] Downloading {hf_filename} from {hf_repo_id}...")
         downloaded_path = hf_hub_download(
@@ -322,6 +326,62 @@ def run_inference(board: Board) -> tuple:
     
     return policy_logits, value
 
+def predict_position(board: Board) -> tuple:
+    """
+    Run neural network inference on a position.
+    Returns (policy_dict, value) where policy_dict maps UCI moves to probabilities.
+    """
+    global _model
+    
+    assert MODEL_READY, "Model not ready — initialization failed"
+    assert _model is not None, "Model not loaded"
+    
+    # Encode board
+    input_tensor = encode_board(board)
+    
+    # Run inference
+    with torch.no_grad():
+        policy_logits, value_tensor = _model(input_tensor)
+        
+        # Extract value (already in [-1, +1] range)
+        if isinstance(value_tensor, torch.Tensor):
+            value = float(value_tensor.item())
+        else:
+            value = float(value_tensor)
+        
+        # Get legal moves and their policy probabilities
+        legal_moves = list(board.legal_moves)
+        if not legal_moves:
+            return {}, value
+            
+        # Extract policy for legal moves
+        import torch.nn.functional as F
+        if policy_logits.dim() > 1:
+            policy_logits = policy_logits.squeeze(0)
+        policy_probs = F.softmax(policy_logits, dim=0)
+        
+        # Build policy dictionary
+        move_probs = {}
+        total_prob = 0.0
+        
+        for move in legal_moves:
+            policy_idx = move_to_policy_index(move)
+            if 0 <= policy_idx < len(policy_probs):
+                prob = float(policy_probs[policy_idx])
+                move_probs[move.uci()] = prob
+                total_prob += prob
+        
+        # Normalize probabilities
+        if total_prob > 0:
+            for move_uci in move_probs:
+                move_probs[move_uci] /= total_prob
+        else:
+            # Uniform fallback
+            uniform_prob = 1.0 / len(legal_moves)
+            move_probs = {move.uci(): uniform_prob for move in legal_moves}
+    
+    return move_probs, value
+
 # ============================================================================
 # MOVE GENERATION
 # ============================================================================
@@ -329,8 +389,8 @@ def run_inference(board: Board) -> tuple:
 @chess_manager.entrypoint
 def mcts_move(ctx: GameContext):
     """
-    Generate a move using direct neural network inference.
-    Gets policy vector of 4096 dimensions and returns legal move with highest probability.
+    Generate a move using One-Step MCTS with neural network.
+    Evaluates current position and all child positions, then selects move using PUCT-style formula.
     """
     assert MODEL_READY, "Model not ready — initialization failed"
     
@@ -345,53 +405,81 @@ def mcts_move(ctx: GameContext):
     
     # Debug: Print move request
     side_to_move = "White" if board.turn else "Black"
-    log_msg = f"=== Move Request ===\nSide to move: {side_to_move}\nFEN: {board.fen()}"
+    log_msg = f"=== One-Step MCTS Request ===\nSide to move: {side_to_move}\nFEN: {board.fen()}"
     print(log_msg)
     _log_to_file(log_msg)
     
     try:
-        # Time the inference
+        # Time the move generation
         import time
         move_start_time = time.perf_counter()
         
-        # Run inference
-        policy_logits, value = run_inference(board)
+        # Evaluate current position
+        current_policy, current_value = predict_position(board)
         
-        # Apply softmax to get probabilities
-        policy_probs = torch.softmax(policy_logits, dim=0)
+        if not current_policy:
+            raise ValueError("No legal moves available")
         
-        # Map legal moves to their policy indices and get probabilities
-        move_probs_dict = {}
-        for move in legal_moves:
-            policy_idx = move_to_policy_index(move)
-            prob = policy_probs[policy_idx].item()
-            move_probs_dict[move] = prob
+        print(f"[One-Step MCTS] Current position value: {current_value:.4f}")
+        print(f"[One-Step MCTS] Evaluating {len(current_policy)} legal moves...")
         
-        if not move_probs_dict:
-            raise RuntimeError("No legal moves found in policy")
+        # Evaluate each child position
+        move_scores = {}
         
-        # Find move with highest probability
-        best_move = max(move_probs_dict, key=move_probs_dict.get)
-        best_prob = move_probs_dict[best_move]
+        for move_uci, policy_prob in current_policy.items():
+            # Make the move
+            move = Move.from_uci(move_uci)
+            board_copy = board.copy()
+            board_copy.push(move)
+            
+            # Evaluate child position
+            _, child_value = predict_position(board_copy)
+            
+            # Flip value for opponent's perspective
+            child_value = -child_value
+            
+            # Calculate PUCT score: P(m) + λ * (V(s_m) - V(s))
+            value_diff = child_value - current_value
+            puct_score = policy_prob + LAMBDA * value_diff
+            
+            move_scores[move_uci] = {
+                'policy': policy_prob,
+                'child_value': child_value,
+                'value_diff': value_diff,
+                'puct_score': puct_score
+            }
+        
+        # Select move with highest PUCT score
+        best_move_uci = max(move_scores.items(), key=lambda x: x[1]['puct_score'])[0]
+        best_score = move_scores[best_move_uci]['puct_score']
+        
+        print(f"[One-Step MCTS] Selected: {best_move_uci} (PUCT score: {best_score:.4f})")
+        
+        # Convert to python-chess Move
+        best_move = Move.from_uci(best_move_uci)
+        
+        # Verify move is legal
+        if best_move not in legal_moves:
+            raise ValueError(f"Selected move {best_move_uci} is not legal")
         
         move_end_time = time.perf_counter()
-        move_time_ms = (move_end_time - move_start_time) * 1000  # Convert to milliseconds
+        move_time_ms = (move_end_time - move_start_time) * 1000
         
-        print(f"[MCTS] Policy inference complete. Best move: {best_move.uci()} (prob: {best_prob:.4f})")
-        print(f"[MCTS] Position value: {value:.4f}")
-        print(f"[MCTS] Move generation time: {move_time_ms:.2f}ms")
-        _log_to_file(f"Selected move: {best_move.uci()} (prob: {best_prob:.4f}, value: {value:.4f}, time: {move_time_ms:.2f}ms)")
+        print(f"[One-Step MCTS] Move generation time: {move_time_ms:.2f}ms")
+        _log_to_file(f"Selected move: {best_move_uci} (PUCT score: {best_score:.4f}, time: {move_time_ms:.2f}ms)")
         
-        # Normalize probabilities for logging
-        total_prob = sum(move_probs_dict.values())
-        normalized_probs = {m: p / total_prob for m, p in move_probs_dict.items()}
+        # Get final policy for logging
+        move_probs = {}
+        for move in legal_moves:
+            move_uci = move.uci()
+            move_probs[move] = current_policy.get(move_uci, 0.0)
         
-        ctx.logProbabilities(normalized_probs)
+        ctx.logProbabilities(move_probs)
         
         return best_move
         
     except Exception as e:
-        print(f"[MCTS] ERROR: Unexpected error: {type(e).__name__}: {e}")
+        print(f"[One-Step MCTS] ERROR: Unexpected error: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         raise
