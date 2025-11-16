@@ -1,12 +1,13 @@
 from .utils import chess_manager, GameContext
-from chess import Move, Board
-import subprocess
+from chess import Move, Board, Square
 import os
 import sys
 import shutil
 import urllib.request
 import zipfile
 from datetime import datetime
+import torch
+import numpy as np
 
 # ============================================================================
 # GLOBAL STATE
@@ -14,16 +15,11 @@ from datetime import datetime
 
 MODEL_READY = False
 MODEL_PATH = None
-MCTS_BRIDGE_PATH = None
+_model = None
 _project_root = None
 
-# MCTS parameters
-MAX_ITERATIONS = 20000
-MAX_SECONDS = 1
-CPUCT = 1.5
-
 # ============================================================================
-# PATH DETECTION AND BRIDGE SETUP
+# PATH DETECTION
 # ============================================================================
 
 # Try to find project root
@@ -39,18 +35,10 @@ print(f"[PATH DEBUG] Possible root 1: {_possible_root1}")
 print(f"[PATH DEBUG] Possible root 2: {_possible_root2}")
 
 # Check which structure we're in
-bridge_path1 = os.path.join(_possible_root1, "MCTS", "mcts_bridge")
-bridge_path2 = os.path.join(_possible_root2, "MCTS", "mcts_bridge")
-
-print(f"[PATH DEBUG] Checking bridge at: {bridge_path1} (exists: {os.path.exists(bridge_path1)})")
-print(f"[PATH DEBUG] Checking bridge at: {bridge_path2} (exists: {os.path.exists(bridge_path2)})")
-
-if os.path.exists(bridge_path1):
-    # Separate deployment repo
+if os.path.exists(os.path.join(_possible_root1, "MCZeroV1.pt")) or os.path.exists(os.path.join(_possible_root1, "requirements.txt")):
     _project_root = _possible_root1
     print(f"[PATH DEBUG] Using separate repo structure, root: {_project_root}")
-elif os.path.exists(bridge_path2):
-    # Nested in ChessMirror
+elif os.path.exists(os.path.join(_possible_root2, "MCZeroV1.pt")) or os.path.exists(os.path.join(_possible_root2, "requirements.txt")):
     _project_root = _possible_root2
     print(f"[PATH DEBUG] Using nested structure, root: {_project_root}")
 else:
@@ -65,197 +53,8 @@ else:
         except Exception as e:
             print(f"[PATH DEBUG] Could not list root directory: {e}")
 
-# Try multiple possible locations for the bridge
-possible_bridge_paths = [
-    os.path.join(_project_root, "MCTS", "mcts_bridge"),  # Standard location
-    os.path.join(_project_root, "MCTS", "Chess", "mcts_bridge"),  # In Chess subdirectory
-]
-
-MCTS_BRIDGE_PATH = None
-for bridge_path in possible_bridge_paths:
-    if os.path.exists(bridge_path):
-        MCTS_BRIDGE_PATH = bridge_path
-        print(f"[PATH DEBUG] Found bridge at: {bridge_path}")
-        break
-
-if not MCTS_BRIDGE_PATH or not os.path.exists(MCTS_BRIDGE_PATH):
-    # Bridge doesn't exist - try to build it using subprocess
-    MCTS_BRIDGE_PATH = possible_bridge_paths[0]
-    mcts_dir = os.path.join(_project_root, "MCTS")
-    makefile_path = os.path.join(mcts_dir, "Makefile")
-    
-    print(f"[BUILD] Bridge not found, attempting to build it...")
-    print(f"[BUILD] MCTS directory: {mcts_dir}")
-    print(f"[BUILD] Target bridge path: {MCTS_BRIDGE_PATH}")
-    
-    # Check if we have the necessary files to build
-    if os.path.exists(mcts_dir) and os.path.exists(makefile_path):
-        libtorch_path = None
-        libtorch_install_dir = "/opt/libtorch"
-        
-        # Step 1: Check if LibTorch exists, if not download it
-        # Note: LibTorch cannot be installed via apt-get - it must be downloaded from PyTorch
-        # Competition organizers can pre-install it to speed up startup
-        libtorch_paths_to_check = [
-            os.environ.get("LIBTORCH_PATH"),  # Check environment variable first
-            libtorch_install_dir,  # /opt/libtorch (standard location)
-            "/usr/local/libtorch",
-            os.path.expanduser("~/libtorch"),
-        ]
-        
-        for path in libtorch_paths_to_check:
-            if path and os.path.exists(path) and os.path.isdir(path):
-                libtorch_path = path
-                print(f"[BUILD] Found pre-installed LibTorch at: {libtorch_path}")
-                break
-        
-        if not libtorch_path:
-            print(f"[BUILD] LibTorch not found, downloading using Python...")
-            try:
-                # Create install directory
-                os.makedirs(os.path.dirname(libtorch_install_dir), exist_ok=True)
-                
-                # Download LibTorch CPU version using Python urllib
-                libtorch_url = "https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-2.1.0%2Bcpu.zip"
-                libtorch_zip = "/tmp/libtorch.zip"
-                
-                print(f"[BUILD] Downloading LibTorch from {libtorch_url}...")
-                print(f"[BUILD] This may take a few minutes (~200MB download)...")
-                
-                # Download using urllib.request (built-in, no external dependencies)
-                def show_progress(block_num, block_size, total_size):
-                    downloaded = block_num * block_size
-                    percent = min(100, (downloaded / total_size) * 100) if total_size > 0 else 0
-                    if block_num % 100 == 0:  # Print every 100 blocks to avoid spam
-                        print(f"[BUILD] Download progress: {percent:.1f}% ({downloaded / (1024*1024):.1f} MB / {total_size / (1024*1024):.1f} MB)")
-                
-                try:
-                    urllib.request.urlretrieve(libtorch_url, libtorch_zip, show_progress)
-                    print(f"[BUILD] Download complete, extracting...")
-                except Exception as e:
-                    print(f"[BUILD] ERROR: Failed to download LibTorch: {type(e).__name__}: {e}")
-                    raise
-                
-                # Extract using Python's zipfile module (built-in, no external dependencies)
-                try:
-                    with zipfile.ZipFile(libtorch_zip, 'r') as zip_ref:
-                        print(f"[BUILD] Extracting LibTorch to /tmp...")
-                        zip_ref.extractall("/tmp")
-                    
-                    # Move to final location
-                    if os.path.exists("/tmp/libtorch"):
-                        if os.path.exists(libtorch_install_dir):
-                            shutil.rmtree(libtorch_install_dir)
-                        os.rename("/tmp/libtorch", libtorch_install_dir)
-                        libtorch_path = libtorch_install_dir
-                        print(f"[BUILD] LibTorch installed at: {libtorch_path}")
-                    else:
-                        print(f"[BUILD] ERROR: LibTorch extraction failed - /tmp/libtorch not found")
-                        # List what was extracted
-                        try:
-                            extracted = os.listdir("/tmp")
-                            print(f"[BUILD] Contents of /tmp: {extracted}")
-                        except:
-                            pass
-                except Exception as e:
-                    print(f"[BUILD] ERROR: Failed to extract LibTorch: {type(e).__name__}: {e}")
-                    raise
-                
-                # Clean up zip file
-                try:
-                    os.remove(libtorch_zip)
-                except:
-                    pass
-                    
-            except Exception as e:
-                print(f"[BUILD] ERROR: Exception during LibTorch installation: {type(e).__name__}: {e}")
-                import traceback
-                print(f"[BUILD] Traceback: {traceback.format_exc()}")
-        
-        # Step 2: Check if build tools are available
-        # Note: In Modal, build tools should be pre-installed by organizers
-        build_tools_available = False
-        try:
-            subprocess.run(["which", "g++"], capture_output=True, check=True)
-            subprocess.run(["which", "make"], capture_output=True, check=True)
-            build_tools_available = True
-            print(f"[BUILD] Build tools (g++, make) are available")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            print(f"[BUILD] ERROR: Build tools (g++, make) not found")
-            print(f"[BUILD] Organizers need to pre-install: build-essential")
-            # Don't try to install via apt-get in Modal - it's not supported
-        
-        # Step 3: Build the bridge if we have everything
-        if libtorch_path and build_tools_available:
-            print(f"[BUILD] Attempting to build bridge with LIBTORCH_PATH={libtorch_path}")
-            try:
-                env = os.environ.copy()
-                env["LIBTORCH_PATH"] = libtorch_path
-                # Set LD_LIBRARY_PATH for runtime
-                lib_path = os.path.join(libtorch_path, "lib")
-                if "LD_LIBRARY_PATH" in env:
-                    env["LD_LIBRARY_PATH"] = f"{lib_path}:{env['LD_LIBRARY_PATH']}"
-                else:
-                    env["LD_LIBRARY_PATH"] = lib_path
-                
-                build_result = subprocess.run(
-                    ["make", "Bridge"],
-                    cwd=mcts_dir,
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=600  # 10 minute timeout for build
-                )
-                
-                if build_result.returncode == 0:
-                    # Check if the bridge was successfully built
-                    if os.path.exists(MCTS_BRIDGE_PATH):
-                        print(f"[BUILD] SUCCESS! Bridge built at: {MCTS_BRIDGE_PATH}")
-                        # Make sure it's executable
-                        os.chmod(MCTS_BRIDGE_PATH, 0o755)
-                    else:
-                        print(f"[BUILD] WARNING: Build completed but bridge not found at expected location")
-                        if build_result.stdout:
-                            print(f"[BUILD] Build stdout: {build_result.stdout}")
-                        if build_result.stderr:
-                            print(f"[BUILD] Build stderr: {build_result.stderr}")
-                else:
-                    print(f"[BUILD] Build failed with return code {build_result.returncode}")
-                    if build_result.stdout:
-                        print(f"[BUILD] Build stdout: {build_result.stdout}")
-                    if build_result.stderr:
-                        print(f"[BUILD] Build stderr: {build_result.stderr}")
-            except subprocess.TimeoutExpired:
-                print(f"[BUILD] ERROR: Build timed out after 10 minutes")
-            except Exception as e:
-                print(f"[BUILD] ERROR: Exception during build: {type(e).__name__}: {e}")
-        else:
-            if not libtorch_path:
-                print(f"[BUILD] ERROR: LibTorch not available - cannot build bridge")
-            if not build_tools_available:
-                print(f"[BUILD] ERROR: Build tools not available - cannot build bridge")
-    else:
-        print(f"[BUILD] ERROR: Cannot build - MCTS directory or Makefile not found")
-    
-    # Final check - did we successfully build it?
-    if not os.path.exists(MCTS_BRIDGE_PATH):
-        print(f"[BUILD] Bridge still not found after build attempt")
-        # List MCTS directory contents for debugging
-        if os.path.exists(mcts_dir):
-            try:
-                mcts_contents = os.listdir(mcts_dir)
-                print(f"[PATH DEBUG] MCTS directory contents: {mcts_contents}")
-                # Check if there are any executables
-                for item in mcts_contents:
-                    item_path = os.path.join(mcts_dir, item)
-                    if os.path.isfile(item_path) and os.access(item_path, os.X_OK):
-                        print(f"[PATH DEBUG] Found executable in MCTS/: {item}")
-            except Exception as e:
-                print(f"[PATH DEBUG] Could not list MCTS directory: {e}")
-
 MODEL_PATH = os.path.join(_project_root, "MCZeroV1.pt")
 
-print(f"[PATH DEBUG] Final bridge path: {MCTS_BRIDGE_PATH}")
 print(f"[PATH DEBUG] Final model path: {MODEL_PATH}")
 
 # ============================================================================
@@ -264,10 +63,10 @@ print(f"[PATH DEBUG] Final model path: {MODEL_PATH}")
 
 def ensure_model_ready():
     """
-    Ensure the model file exists, is valid, and ready to use.
+    Ensure the model file exists, is valid, and loaded into memory.
     Downloads from HuggingFace if needed. Runs exactly once at startup.
     """
-    global MODEL_READY, MODEL_PATH
+    global MODEL_READY, MODEL_PATH, _model
     
     if MODEL_READY:
         return
@@ -316,7 +115,16 @@ def ensure_model_ready():
         print(f"[INIT] WARNING: Could not validate model zip: {type(e).__name__}: {e}")
         print(f"[INIT] Will attempt to use model anyway")
     
-    # 5. Mark as ready
+    # 5. Load model into memory
+    print("[INIT] Loading PyTorch model...")
+    try:
+        _model = torch.jit.load(MODEL_PATH, map_location='cpu')
+        _model.eval()  # Set to evaluation mode
+        print("[INIT] Model loaded successfully!")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load model: {type(e).__name__}: {e}")
+    
+    # 6. Mark as ready
     MODEL_READY = True
     print("[INIT] Model ready.")
 
@@ -388,135 +196,132 @@ def _log_to_file(message: str):
         print(f"[MCTS] Failed to write to log file: {e}")
 
 # ============================================================================
-# UTILITY FUNCTIONS
+# BOARD ENCODING
 # ============================================================================
 
-def uci_to_move(board: Board, uci_str: str) -> Move:
-    """Convert UCI string (e.g., 'e2e4') to python-chess Move object."""
-    try:
-        # python-chess handles UCI conversion automatically
-        move = Move.from_uci(uci_str)
-        
-        # Verify it's legal
-        if move not in board.legal_moves:
-            raise ValueError(f"Move {uci_str} is not legal in current position")
-        
-        return move
-    except ValueError as e:
-        raise ValueError(f"Invalid UCI move format '{uci_str}': {e}")
-
-# ============================================================================
-# PERSISTENT BRIDGE PROCESS
-# ============================================================================
-
-_bridge_process = None
-_bridge_stdin = None
-_bridge_stdout = None
-_bridge_lock = None
-
-def _init_bridge_lock():
-    """Initialize the bridge lock (thread-safe)."""
-    global _bridge_lock
-    if _bridge_lock is None:
-        import threading
-        _bridge_lock = threading.Lock()
-
-def _start_persistent_bridge():
-    """Start the persistent bridge process that keeps the model loaded in memory."""
-    global _bridge_process, _bridge_stdin, _bridge_stdout
-    
-    _init_bridge_lock()
-    
-    with _bridge_lock:
-        if _bridge_process is not None and _bridge_process.poll() is None:
-            # Process is still alive
-            return True
-        
-        print(f"[INIT] Starting persistent bridge process (model loads once)...")
-        try:
-            _bridge_process = subprocess.Popen(
-                [
-                    MCTS_BRIDGE_PATH,
-                    "--persistent",
-                    MODEL_PATH,
-                    str(MAX_ITERATIONS),
-                    str(MAX_SECONDS),
-                    str(CPUCT)
-                ],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1  # Line buffered
-            )
-            
-            _bridge_stdin = _bridge_process.stdin
-            _bridge_stdout = _bridge_process.stdout
-            
-            # Wait a moment to see if it starts successfully
-            import time
-            time.sleep(0.5)
-            
-            if _bridge_process.poll() is not None:
-                # Process died immediately
-                stderr_output = _bridge_process.stderr.read() if _bridge_process.stderr else "No stderr"
-                print(f"[INIT] ERROR: Bridge process died immediately: {stderr_output}")
-                _bridge_process = None
-                return False
-            
-            print(f"[INIT] Persistent bridge started (PID: {_bridge_process.pid})")
-            return True
-            
-        except Exception as e:
-            print(f"[INIT] ERROR: Failed to start persistent bridge: {type(e).__name__}: {e}")
-            _bridge_process = None
-            return False
-
-# Start persistent bridge process (model loaded once, stays in memory)
-_start_persistent_bridge()
-
-def run_bridge(fen: str) -> str:
+def encode_board(board: Board) -> torch.Tensor:
     """
-    Execute the MCTS bridge and return the UCI move string.
-    Uses persistent bridge process to avoid reloading model on every move.
+    Encode chess board to 18-channel 8x8 tensor.
+    Channels 0-11: Piece planes (white pawn, knight, bishop, rook, queen, king, then black pieces)
+    Channel 12: Side to move (1.0 for white, 0.0 for black) - full 8x8 plane
+    Channels 13-16: Castling rights (white kingside, white queenside, black kingside, black queenside)
+    Channel 17: En passant target square
+    Returns: torch.Tensor of shape (1, 18, 8, 8)
     """
-    global _bridge_process, _bridge_stdin, _bridge_stdout
+    # Initialize tensor: (18 channels, 8 rows, 8 cols)
+    tensor = torch.zeros(18, 8, 8, dtype=torch.float32)
+    
+    # Channels 0-11: Pieces
+    piece_channels = {
+        ('P', True): 0,   # White pawn
+        ('N', True): 1,   # White knight
+        ('B', True): 2,   # White bishop
+        ('R', True): 3,   # White rook
+        ('Q', True): 4,   # White queen
+        ('K', True): 5,   # White king
+        ('p', False): 6,  # Black pawn
+        ('n', False): 7,  # Black knight
+        ('b', False): 8,  # Black bishop
+        ('r', False): 9,  # Black rook
+        ('q', False): 10, # Black queen
+        ('k', False): 11, # Black king
+    }
+    
+    # Encode pieces
+    for rank in range(8):
+        for file in range(8):
+            square = Square(file + rank * 8)
+            piece = board.piece_at(square)
+            
+            if piece is not None:
+                piece_symbol = piece.symbol()
+                is_white = piece.color
+                channel = piece_channels.get((piece_symbol, is_white))
+                if channel is not None:
+                    tensor[channel, rank, file] = 1.0
+    
+    # Channel 12: Side to move (1.0 for white, 0.0 for black)
+    side_to_move_value = 1.0 if board.turn else 0.0
+    tensor[12, :, :] = side_to_move_value
+    
+    # Channels 13-16: Castling rights
+    if board.has_kingside_castling_rights(True):   # White kingside
+        tensor[13, :, :] = 1.0
+    if board.has_queenside_castling_rights(True): # White queenside
+        tensor[14, :, :] = 1.0
+    if board.has_kingside_castling_rights(False):  # Black kingside
+        tensor[15, :, :] = 1.0
+    if board.has_queenside_castling_rights(False): # Black queenside
+        tensor[16, :, :] = 1.0
+    
+    # Channel 17: En passant target square
+    if board.ep_square is not None:
+        ep_rank = board.ep_square // 8
+        ep_file = board.ep_square % 8
+        tensor[17, ep_rank, ep_file] = 1.0
+    
+    # Add batch dimension: (1, 18, 8, 8)
+    return tensor.unsqueeze(0)
+
+# ============================================================================
+# POLICY TO MOVE MAPPING
+# ============================================================================
+
+def policy_index_to_move(policy_idx: int) -> tuple:
+    """
+    Convert policy index (0-4095) to (from_square, to_square).
+    Policy index = from_square * 64 + to_square
+    """
+    from_square = policy_idx // 64
+    to_square = policy_idx % 64
+    return (from_square, to_square)
+
+def move_to_policy_index(move: Move) -> int:
+    """
+    Convert Move to policy index.
+    Policy index = from_square * 64 + to_square
+    """
+    from_sq = move.from_square
+    to_sq = move.to_square
+    return from_sq * 64 + to_sq
+
+# ============================================================================
+# INFERENCE
+# ============================================================================
+
+def run_inference(board: Board) -> tuple:
+    """
+    Run model inference on board position.
+    Returns: (policy_tensor, value)
+    - policy_tensor: torch.Tensor of shape (4096,) with policy logits
+    - value: float in [-1, 1] range
+    """
+    global _model
     
     assert MODEL_READY, "Model not ready — initialization failed"
-    assert os.path.exists(MCTS_BRIDGE_PATH), f"Bridge not found at {MCTS_BRIDGE_PATH}"
+    assert _model is not None, "Model not loaded"
     
-    _init_bridge_lock()
+    # Encode board to tensor
+    board_tensor = encode_board(board)
     
-    # Ensure bridge is running
-    if not _start_persistent_bridge():
-        raise RuntimeError("Failed to start persistent bridge")
+    # Run inference
+    with torch.no_grad():
+        outputs = _model(board_tensor)
+        
+        # Model outputs: (policy_logits, value)
+        if isinstance(outputs, tuple):
+            policy_logits = outputs[0]  # Shape: (1, 4096)
+            value = outputs[1].item()   # Shape: (1,)
+        else:
+            # Handle case where model returns single tensor
+            policy_logits = outputs[0] if len(outputs) > 0 else outputs
+            value = 0.0
     
-    with _bridge_lock:
-        try:
-            # Send FEN to bridge
-            _bridge_stdin.write(fen + "\n")
-            _bridge_stdin.flush()
-            
-            # Read move from bridge (blocking read)
-            move = _bridge_stdout.readline().strip()
-            
-            if not move:
-                # Process might have died
-                if _bridge_process.poll() is not None:
-                    stderr_output = _bridge_process.stderr.read() if _bridge_process.stderr else "No stderr"
-                    raise RuntimeError(f"Bridge process died: {stderr_output}")
-                raise RuntimeError("Bridge returned empty move")
-            
-            return move
-            
-        except BrokenPipeError:
-            # Process died
-            _bridge_process = None
-            _bridge_stdin = None
-            _bridge_stdout = None
-            raise RuntimeError("Bridge process died (broken pipe)")
-        except Exception as e:
-            raise RuntimeError(f"Error communicating with bridge: {type(e).__name__}: {e}")
+    # Remove batch dimension from policy: (4096,)
+    if policy_logits.dim() > 1:
+        policy_logits = policy_logits.squeeze(0)
+    
+    return policy_logits, value
 
 # ============================================================================
 # MOVE GENERATION
@@ -525,76 +330,71 @@ def run_bridge(fen: str) -> str:
 @chess_manager.entrypoint
 def mcts_move(ctx: GameContext):
     """
-    Generate a move using MCTS + CNN.
-    Calls the C++ MCTS engine via subprocess.
+    Generate a move using direct neural network inference.
+    Gets policy vector of 4096 dimensions and returns legal move with highest probability.
     """
     assert MODEL_READY, "Model not ready — initialization failed"
     
-    # Get current board FEN
-    fen = ctx.board.fen()
+    # Get current board
+    board = ctx.board
     
     # Check if we have legal moves
-    legal_moves = list(ctx.board.generate_legal_moves())
+    legal_moves = list(board.generate_legal_moves())
     if not legal_moves:
         ctx.logProbabilities({})
         raise ValueError("No legal moves available")
     
     # Debug: Print move request
-    side_to_move = "White" if ctx.board.turn else "Black"
-    log_msg = f"=== Move Request ===\nSide to move: {side_to_move}\nFEN: {fen}"
+    side_to_move = "White" if board.turn else "Black"
+    log_msg = f"=== Move Request ===\nSide to move: {side_to_move}\nFEN: {board.fen()}"
     print(log_msg)
     _log_to_file(log_msg)
     
-    # Check if bridge executable exists
-    if not os.path.exists(MCTS_BRIDGE_PATH):
-        print(f"[MCTS] ERROR: Bridge not found at {MCTS_BRIDGE_PATH}")
-        print(f"[MCTS] Falling back to random move")
-        # Fallback to random move if bridge doesn't exist
-        import random
-        move = random.choice(legal_moves)
-        move_probs = {m: 1.0 / len(legal_moves) for m in legal_moves}
-        ctx.logProbabilities(move_probs)
-        return move
-    
     try:
-        # Call MCTS bridge
-        uci_move = run_bridge(fen)
+        # Time the inference
+        import time
+        move_start_time = time.perf_counter()
         
-        print(f"[MCTS] Bridge returned: {uci_move}")
-        _log_to_file(f"Selected move: {uci_move}")
+        # Run inference
+        policy_logits, value = run_inference(board)
         
-        # Convert UCI to python-chess Move
-        move = uci_to_move(ctx.board, uci_move)
-        print(f"[MCTS] Selected move: {move.uci()}")
+        # Apply softmax to get probabilities
+        policy_probs = torch.softmax(policy_logits, dim=0)
         
-        # Get move probabilities from MCTS (we'll use uniform for now since
-        # the bridge doesn't return probabilities - could enhance later)
-        move_probs = {m: 1.0 / len(legal_moves) for m in legal_moves}
-        # Set the chosen move to have higher probability
-        move_probs[move] = 0.5
-        # Renormalize
-        total = sum(move_probs.values())
-        move_probs = {m: p / total for m, p in move_probs.items()}
+        # Map legal moves to their policy indices and get probabilities
+        move_probs_dict = {}
+        for move in legal_moves:
+            policy_idx = move_to_policy_index(move)
+            prob = policy_probs[policy_idx].item()
+            move_probs_dict[move] = prob
         
-        ctx.logProbabilities(move_probs)
+        if not move_probs_dict:
+            raise RuntimeError("No legal moves found in policy")
         
-        return move
+        # Find move with highest probability
+        best_move = max(move_probs_dict, key=move_probs_dict.get)
+        best_prob = move_probs_dict[best_move]
         
-    except subprocess.TimeoutExpired:
-        error_msg = f"MCTS bridge timed out after {MAX_SECONDS + 10} seconds"
-        print(f"[MCTS] ERROR: {error_msg}")
-        raise RuntimeError(error_msg)
-    except subprocess.CalledProcessError as e:
-        error_msg = e.stderr if e.stderr else e.stdout
-        print(f"[MCTS] ERROR: Bridge failed with return code {e.returncode}")
-        print(f"[MCTS] stderr: {e.stderr}")
-        print(f"[MCTS] stdout: {e.stdout}")
-        raise RuntimeError(f"MCTS bridge failed: {error_msg}")
-    except ValueError as e:
-        print(f"[MCTS] ERROR: Invalid move: {e}")
-        raise ValueError(f"Invalid move from MCTS bridge: {e}")
+        move_end_time = time.perf_counter()
+        move_time_ms = (move_end_time - move_start_time) * 1000  # Convert to milliseconds
+        
+        print(f"[MCTS] Policy inference complete. Best move: {best_move.uci()} (prob: {best_prob:.4f})")
+        print(f"[MCTS] Position value: {value:.4f}")
+        print(f"[MCTS] Move generation time: {move_time_ms:.2f}ms")
+        _log_to_file(f"Selected move: {best_move.uci()} (prob: {best_prob:.4f}, value: {value:.4f}, time: {move_time_ms:.2f}ms)")
+        
+        # Normalize probabilities for logging
+        total_prob = sum(move_probs_dict.values())
+        normalized_probs = {m: p / total_prob for m, p in move_probs_dict.items()}
+        
+        ctx.logProbabilities(normalized_probs)
+        
+        return best_move
+        
     except Exception as e:
         print(f"[MCTS] ERROR: Unexpected error: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 
