@@ -68,8 +68,8 @@ else:
             print(f"[PATH DEBUG] Found bridge at: {bridge_path}")
             break
     
-    if not MCTS_BRIDGE_PATH:
-        # Fallback to standard location even if it doesn't exist
+    if not MCTS_BRIDGE_PATH or not os.path.exists(MCTS_BRIDGE_PATH):
+        # Bridge doesn't exist - this means it hasn't been built
         MCTS_BRIDGE_PATH = possible_bridge_paths[0]
         print(f"[PATH DEBUG] Bridge not found in any location, using: {MCTS_BRIDGE_PATH}")
         # List MCTS directory contents for debugging
@@ -85,6 +85,14 @@ else:
                         print(f"[PATH DEBUG] Found executable in MCTS/: {item}")
             except Exception as e:
                 print(f"[PATH DEBUG] Could not list MCTS directory: {e}")
+        
+        # Check if we're in a deployment environment (not Docker)
+        if "/tmp/deployments/" in _project_root:
+            print(f"[ERROR] MCTS bridge executable not found!")
+            print(f"[ERROR] The deployment environment has extracted the source code but hasn't built the C++ executable.")
+            print(f"[ERROR] The bridge needs to be compiled using: cd {mcts_dir} && LIBTORCH_PATH=/path/to/libtorch make Bridge")
+            print(f"[ERROR] This requires: build tools (g++, make), LibTorch libraries, and proper LIBTORCH_PATH")
+            print(f"[ERROR] The deployment system should build this via Docker, but it appears to be running outside Docker.")
     
     MODEL_PATH = os.path.join(_project_root, "MCZeroV1.pt")
     
